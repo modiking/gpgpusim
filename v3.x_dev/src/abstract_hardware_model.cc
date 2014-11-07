@@ -752,9 +752,11 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
         print(Divergence_Print_File1);
         fclose(Divergence_Print_File1);
     }
+    */
 
     m_stack.pop_back();
 
+    /*
     //a smaller old value means we have added to the stack
     if(old_stack_size < m_stack.size()){
         FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
