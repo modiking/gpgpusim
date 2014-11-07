@@ -800,9 +800,10 @@ void scheduler_unit::order_by_priority( std::vector< T >& result_list,
     }
 }
 
+
 void scheduler_unit::cycle()
 {
-    SCHED_DPRINTF( "scheduler_unit::cycle()\n" );
+    //SCHED_DPRINTF( "scheduler_unit::cycle()\n" );
     bool valid_inst = false;  // there was one warp with a valid instruction to issue (didn't require flush due to control hazard)
     bool ready_inst = false;  // of the valid instructions, there was one not waiting for pending register writes
     bool issued_inst = false; // of these we issued one
@@ -815,22 +816,50 @@ void scheduler_unit::cycle()
         if ( (*iter) == NULL || (*iter)->done_exit() ) {
             continue;
         }
-        SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
-                       (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+        //SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
+        //               (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
         unsigned warp_id = (*iter)->get_warp_id();
         unsigned checked=0;
         unsigned issued=0;
         unsigned max_issue = m_shader->m_config->gpgpu_max_insn_issue_per_warp;
-        while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) ) {
+
+        unsigned checked_temp = 0;
+        unsigned issued_temp = 0;
+
+        unsigned depth = 0;
+
+        //exit if entire buffer is empty
+        while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) ) {
+
+            //if current buffer is empty move on
+            if (warp(warp_id).ibuffer_empty()){
+              depth++;
+              warp(warp_id).ibuffer_next_frag();
+            }
+
             const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
             bool valid = warp(warp_id).ibuffer_next_valid();
             bool warp_inst_issued = false;
+            //NEW, variable to track if we exceeded the stack
+            bool valid_stack_entry = true;
+
+            //SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) checking at stack depth %u\n",
+            //                 (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id(), depth );
+            
+
             unsigned pc,rpc;
-            m_simt_stack[warp_id]->get_pdom_stack_top_info(&pc,&rpc);
-            SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) has valid instruction (%s)\n",
-                           (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id(),
-                           ptx_get_insn_str( pc).c_str() );
+            valid_stack_entry = m_simt_stack[warp_id]->iter_get_pdom_stack(depth,&pc,&rpc);
+
+            if (valid_stack_entry && valid){
+
+              SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) has valid instruction (%s) at stack depth %u\n",
+                             (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id(),
+                             ptx_get_insn_str( pc).c_str(), depth );
+            }
+          
+            //should still check if there's at least 1 instruction
             if( pI ) {
+                //sanity check that the instruction is valid
                 assert(valid);
                 if( pc != pI->pc ) {
                     SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) control hazard instruction flush\n",
@@ -848,14 +877,14 @@ void scheduler_unit::cycle()
                         SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
                                        (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
                         ready_inst = true;
-                        const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
+                        const active_mask_t &active_mask = m_simt_stack[warp_id]->iter_get_active_mask(depth);
                         assert( warp(warp_id).inst_in_pipeline() );
 
                         //MEMORY INSTRUCTION
                         if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) {
                             if( m_mem_out->has_free() ) {
                                 m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id);
-                                issued++;
+                                issued_temp++;
                                 issued_inst=true;
                                 warp_inst_issued = true;
                             }
@@ -867,13 +896,13 @@ void scheduler_unit::cycle()
                             if( sp_pipe_avail && (pI->op != SFU_OP) ) {
                                 // always prefer SP pipe for operations that can use both SP and SFU pipelines
                                 m_shader->issue_warp(*m_sp_out,pI,active_mask,warp_id);
-                                issued++;
+                                issued_temp++;
                                 issued_inst=true;
                                 warp_inst_issued = true;
                             } else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
                                 if( sfu_pipe_avail ) {
                                     m_shader->issue_warp(*m_sfu_out,pI,active_mask,warp_id);
-                                    issued++;
+                                    issued_temp++;
                                     issued_inst=true;
                                     warp_inst_issued = true;
                                 }
@@ -895,26 +924,38 @@ void scheduler_unit::cycle()
                 SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) issued %u instructions\n",
                                (*iter)->get_warp_id(),
                                (*iter)->get_dynamic_warp_id(),
-                               issued );
-                do_on_warp_issued( warp_id, issued, iter );
+                               issued_temp );
+                do_on_warp_issued( warp_id, issued_temp, iter );
             }
-            checked++;
-        }
-        if ( issued ) {
-            // This might be a bit inefficient, but we need to maintain
-            // two ordered list for proper scheduler execution.
-            // We could remove the need for this loop by associating a
-            // supervised_is index with each entry in the m_next_cycle_prioritized_warps
-            // vector. For now, just run through until you find the right warp_id
-            for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
-                  supervised_iter != m_supervised_warps.end();
-                  ++supervised_iter ) {
-                if ( *iter == *supervised_iter ) {
-                    m_last_supervised_issued = supervised_iter;
-                }
-            }
-            break;
-        } 
+            checked_temp++;
+
+            //if issued/checked is incremented inside, we should only expose 1 to the scheduler up here
+            checked = checked_temp;
+            issued = issued_temp;
+
+            //checked_temp = 0;
+            //issued_temp = 0;
+          }
+
+
+
+          if ( issued ) {
+              // This might be a bit inefficient, but we need to maintain
+              // two ordered list for proper scheduler execution.
+              // We could remove the need for this loop by associating a
+              // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+              // vector. For now, just run through until you find the right warp_id
+              for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                    supervised_iter != m_supervised_warps.end();
+                    ++supervised_iter ) {
+                  if ( *iter == *supervised_iter ) {
+                      m_last_supervised_issued = supervised_iter;
+                  }
+              }
+              break;
+          }
+           
+        
     }
 
     // issue stall statistics:

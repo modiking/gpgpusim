@@ -290,6 +290,10 @@ public:
     unsigned get_rp() const;
     void     print(FILE*fp) const;
 
+    //NEW functions
+    bool     iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const;
+    const simt_mask_t &iter_get_active_mask(signed depth) const;
+
 protected:
     unsigned m_warp_id;
     unsigned m_warp_size;

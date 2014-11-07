@@ -593,11 +593,39 @@ const simt_mask_t &simt_stack::get_active_mask() const
     return m_stack.back().m_active_mask;
 }
 
-void simt_stack::get_pdom_stack_top_info( unsigned *pc, unsigned *rpc ) const
+void simt_stack::get_pdom_stack_top_info(unsigned *pc, unsigned *rpc ) const
 {
    assert(m_stack.size() > 0);
    *pc = m_stack.back().m_pc;
    *rpc = m_stack.back().m_recvg_pc;
+}
+
+//NEW function, go through stack, to get the active mask
+const simt_mask_t &simt_stack::iter_get_active_mask(signed depth) const
+{
+  if (depth >= m_stack.size())
+    return false;
+
+  assert(m_stack.size() > 0);
+  return m_stack.at(m_stack.size()-depth-1).m_active_mask;
+}
+
+//NEW function, go through the stack, if we hit size 1 returns FALSE
+bool simt_stack::iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const
+{
+
+  //printf("m_stack size = %d\n", m_stack.size());
+  //printf("bool eval = %d\n", depth >= m_stack.size());
+  //printf("m_stack.size()-depth-1 = %d\n", m_stack.size()-depth-1);
+  //check to make sure the entry exists
+  if (depth >= m_stack.size())
+    return false;
+
+  assert(m_stack.size() > 0);
+  *pc = m_stack.at(m_stack.size()-depth-1).m_pc;
+  *rpc = m_stack.at(m_stack.size()-depth-1).m_recvg_pc;
+
+  return true;
 }
 
 unsigned simt_stack::get_rp() const 

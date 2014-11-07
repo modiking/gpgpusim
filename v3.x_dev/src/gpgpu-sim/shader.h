@@ -76,6 +76,9 @@
 //NEW, max concurrent warp fragments per warp
 #define MAX_WARP_FRAGMENTS 4
 
+//NEW, pulled definition from inside of the warp_t object
+#define IBUFFER_SIZE 2
+
 class thread_ctx_t {
 public:
    unsigned m_cta_id; // hardware CTA this thread belongs
@@ -244,7 +247,6 @@ public:
     unsigned get_warp_id() const { return m_warp_id; }
 
 private:
-    static const unsigned IBUFFER_SIZE=2;
     class shader_core_ctx *m_shader;
     unsigned m_cta_id;
     unsigned m_warp_id;
