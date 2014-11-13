@@ -294,6 +294,13 @@ public:
     bool     iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const;
     const simt_mask_t &iter_get_active_mask(signed depth) const;
 
+    //NEW structure to store fragments
+    struct fragment_entry {
+        address_type pc;
+        signed depth;
+    };
+    std::deque<fragment_entry> get_fragments();
+
 protected:
     unsigned m_warp_id;
     unsigned m_warp_size;
@@ -315,6 +322,8 @@ protected:
     };
 
     std::deque<simt_stack_entry> m_stack;
+    std::deque<fragment_entry> m_fragment_entries;
+
 };
 
 #define GLOBAL_HEAP_START 0x80000000

@@ -626,6 +626,18 @@ void shader_core_ctx::fetch()
 
             // this code fetches instructions from the i-cache or generates memory requests
             if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending() && m_warp[warp_id].ibuffer_empty() ) {
+                std::deque<simt_stack::fragment_entry> fragment_entries;
+                fragment_entries = m_simt_stack[warp_id]->get_fragments();
+
+                //TEST code: print out fragments if there are more than 2
+                //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
+                if (fragment_entries.size() > 1){
+                  printf("Warp %d has fragments\n", warp_id);
+                  for (int j = fragment_entries.size()-1; j >= 0 ; j--){
+                    printf("Depth (%d): PC = %s\n", fragment_entries.at(j).depth, ptx_get_insn_str(fragment_entries.at(j).pc).c_str());
+                  }
+                }
+
                 address_type pc  = m_warp[warp_id].get_pc();
                 address_type ppc = pc + PROGRAM_MEM_START;
                 unsigned nbytes=16; 

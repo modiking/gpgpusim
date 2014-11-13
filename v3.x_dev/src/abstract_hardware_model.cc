@@ -628,6 +628,59 @@ bool simt_stack::iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc )
   return true;
 }
 
+//NEW function, iterate through stack and find fragments
+std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
+{
+    std::deque<simt_mask_t> fragment_mask;
+    fragment_entry new_fragment_entry;
+
+    m_fragment_entries.clear();
+
+    //if there is only 1 entry, it automatically is a fragment
+
+    //iterate from top of the stack down to bottom
+    for (int i = m_stack.size()-1; i >= 0; i--)
+    {
+      //if the stack doesn't have a divergence tagged, we add it as executable
+      //a 0 means its not a diverged branch
+      if (m_stack.at(i).m_branch_div_cycle == 0)
+      {
+        new_fragment_entry.pc = m_stack.at(i).m_pc;
+        new_fragment_entry.depth = m_stack.size()-i-1;
+        m_fragment_entries.push_back(new_fragment_entry);
+        fragment_mask.push_back(m_stack.at(i).m_active_mask);
+      }
+    }
+
+    //TEST code: print out fragments if there are more than 2
+    //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
+    /*
+    if (m_fragment_entries.size() > 1){
+      printf("Test Code\n");
+      printf("SIMT stack state:\n");
+      //print to stdout
+      simt_stack::print(stdout);
+      for (int j = m_fragment_entries.size() - 1; j >= 0 ; j--){
+        printf("Depth (%d): PC = %s\n", m_fragment_entries.at(j).depth, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
+        printf("Mask: ");
+        for (unsigned i=0; i<m_warp_size; i++)
+            printf("%c", (fragment_mask.at(j).test(i)?'1':'0') );
+        printf("\n");
+      }
+    }*/
+
+    simt_mask_t composite_mask = 0;
+    //sanity check on fragments to make sure they're disjoint
+    for (int j = 0; j < fragment_mask.size(); j++){
+      //if a 1 bit shows up (collision in mask)
+      //want negative assertion because any() returns a 0 when the vector is 0, which is
+      //the correct behavior
+      assert(!(composite_mask & fragment_mask.at(j)).any());
+      composite_mask |= fragment_mask.at(j);
+    }
+
+    return m_fragment_entries;
+}
 unsigned simt_stack::get_rp() const 
 { 
     assert(m_stack.size() > 0);
