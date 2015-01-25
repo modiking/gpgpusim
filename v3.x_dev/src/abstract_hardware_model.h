@@ -861,7 +861,11 @@ public:
         }
     };
 
-    void generate_mem_accesses();
+    void generate_mem_accesses(unsigned shader_id, unsigned long long cycle_count);
+	
+	//NEW STUFF, function to print out all memory accesses
+	void print_memory_accesses(unsigned shader_id, unsigned long long cycle_count);
+	
     void memory_coalescing_arch_13( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_13_atomic( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_13_reduce_and_send( bool is_write, mem_access_type access_type, const transaction_info &info, new_addr_type addr, unsigned segment_size );

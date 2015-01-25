@@ -50,6 +50,9 @@
 #define PRIORITIZE_MSHR_OVER_WB 1
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MIN(a,b) (((a)<(b))?(a):(b))
+
+//NEW STUFF, flag to determine whether to print some debug messages
+#define DEBUG_PRINT 0
     
 
 /////////////////////////////////////////////////////////////////////////////
@@ -631,12 +634,15 @@ void shader_core_ctx::fetch()
 
                 //TEST code: print out fragments if there are more than 2
                 //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
-                if (fragment_entries.size() > 1){
-                  printf("Warp %d has fragments\n", warp_id);
-                  for (int j = fragment_entries.size()-1; j >= 0 ; j--){
-                    printf("Depth (%d): PC = %s\n", fragment_entries.at(j).depth, ptx_get_insn_str(fragment_entries.at(j).pc).c_str());
-                  }
-                }
+				
+				if (DEBUG_PRINT){
+					if (fragment_entries.size() > 1){
+					  printf("Warp %d has fragments\n", warp_id);
+					  for (int j = fragment_entries.size()-1; j >= 0 ; j--){
+						printf("Depth (%d): PC = %s\n", fragment_entries.at(j).depth, ptx_get_insn_str(fragment_entries.at(j).pc).c_str());
+					  }
+					}
+				}
 
                 address_type pc  = m_warp[warp_id].get_pc();
                 address_type ppc = pc + PROGRAM_MEM_START;
@@ -688,8 +694,12 @@ void shader_core_ctx::fetch()
 void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
 {
     execute_warp_inst_t(inst);
-    if( inst.is_load() || inst.is_store() )
-        inst.generate_mem_accesses();
+    if( inst.is_load() || inst.is_store() ) {
+		//printf("Memory access generated\n");
+		//NEW, pass in cycle number + core information to print in abstract_hardware_model
+		//m_sid is a "unsigned", shader_cycles is a "unsigned long long""
+        inst.generate_mem_accesses(m_sid, gpu_sim_cycle+gpu_tot_sim_cycle);
+	}
 }
 
 void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id )

@@ -73,6 +73,7 @@ typedef int flex_int32_t;
 typedef unsigned char flex_uint8_t; 
 typedef unsigned short int flex_uint16_t;
 typedef unsigned int flex_uint32_t;
+#endif /* ! C99 */
 
 /* Limits of integral types. */
 #ifndef INT8_MIN
@@ -102,8 +103,6 @@ typedef unsigned int flex_uint32_t;
 #ifndef UINT32_MAX
 #define UINT32_MAX             (4294967295U)
 #endif
-
-#endif /* ! C99 */
 
 #endif /* ! FLEXINT_H */
 
@@ -161,15 +160,7 @@ typedef unsigned int flex_uint32_t;
 
 /* Size of default input buffer. */
 #ifndef YY_BUF_SIZE
-#ifdef __ia64__
-/* On IA-64, the buffer size is 16k, not 8k.
- * Moreover, YY_BUF_SIZE is 2*YY_READ_BUF_SIZE in the general case.
- * Ditto for the __ia64__ case accordingly.
- */
-#define YY_BUF_SIZE 32768
-#else
 #define YY_BUF_SIZE 16384
-#endif /* __ia64__ */
 #endif
 
 /* The state buf must be large enough to hold one state per character in the main buffer.
@@ -1202,7 +1193,7 @@ char *sass_text;
 
 void sass_error(const char*);
 /*Regular expresions go here*/
-#line 1206 "sass_lexer.cc"
+#line 1197 "sass_lexer.cc"
 
 #define INITIAL 0
 
@@ -1281,12 +1272,7 @@ static int input (void );
 
 /* Amount of stuff to slurp up with each read. */
 #ifndef YY_READ_BUF_SIZE
-#ifdef __ia64__
-/* On IA-64, the buffer size is 16k, not 8k */
-#define YY_READ_BUF_SIZE 16384
-#else
 #define YY_READ_BUF_SIZE 8192
-#endif /* __ia64__ */
 #endif
 
 /* Copy whatever the last rule matched to the standard output. */
@@ -1305,7 +1291,7 @@ static int input (void );
 	if ( YY_CURRENT_BUFFER_LVALUE->yy_is_interactive ) \
 		{ \
 		int c = '*'; \
-		size_t n; \
+		unsigned n; \
 		for ( n = 0; n < max_size && \
 			     (c = getc( sass_in )) != EOF && c != '\n'; ++n ) \
 			buf[n] = (char) c; \
@@ -1399,7 +1385,7 @@ YY_DECL
 
 	/*label*/
 
-#line 1403 "sass_lexer.cc"
+#line 1389 "sass_lexer.cc"
 
 	if ( !(yy_init) )
 		{
@@ -2640,7 +2626,7 @@ YY_RULE_SETUP
 #line 359 "sass.l"
 ECHO;
 	YY_BREAK
-#line 2644 "sass_lexer.cc"
+#line 2630 "sass_lexer.cc"
 
 	case YY_END_OF_BUFFER:
 		{
@@ -3365,8 +3351,8 @@ YY_BUFFER_STATE sass__scan_string (yyconst char * yystr )
 
 /** Setup the input buffer state to scan the given bytes. The next call to sass_lex() will
  * scan from a @e copy of @a bytes.
- * @param yybytes the byte buffer to scan
- * @param _yybytes_len the number of bytes in the buffer pointed to by @a bytes.
+ * @param bytes the byte buffer to scan
+ * @param len the number of bytes in the buffer pointed to by @a bytes.
  * 
  * @return the newly allocated buffer state object.
  */
