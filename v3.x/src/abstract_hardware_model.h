@@ -283,12 +283,23 @@ public:
 
     void reset();
     void launch( address_type start_pc, const simt_mask_t &active_mask );
-    void update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op );
+    void update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId );
 
     const simt_mask_t &get_active_mask() const;
     void     get_pdom_stack_top_info( unsigned *pc, unsigned *rpc ) const;
     unsigned get_rp() const;
     void     print(FILE*fp) const;
+
+    //NEW functions
+    bool     iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const;
+    const simt_mask_t &iter_get_active_mask(signed depth) const;
+
+    //NEW structure to store fragments
+    struct fragment_entry {
+        address_type pc;
+        signed depth;
+    };
+    std::deque<fragment_entry> get_fragments();
 
 protected:
     unsigned m_warp_id;
@@ -311,6 +322,8 @@ protected:
     };
 
     std::deque<simt_stack_entry> m_stack;
+    std::deque<fragment_entry> m_fragment_entries;
+
 };
 
 #define GLOBAL_HEAP_START 0x80000000

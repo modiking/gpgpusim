@@ -655,7 +655,11 @@ void gpgpu_sim::reinit_clock_domains(void)
 bool gpgpu_sim::active()
 {
     if (m_config.gpu_max_cycle_opt && (gpu_tot_sim_cycle + gpu_sim_cycle) >= m_config.gpu_max_cycle_opt) 
-       return false;
+    {  
+      //printf("\nAHHHH WHY ARE YOU NOT EXITING!!!!!\n");
+
+      return false;
+    }
     if (m_config.gpu_max_insn_opt && (gpu_tot_sim_insn + gpu_sim_insn) >= m_config.gpu_max_insn_opt) 
        return false;
     if (m_config.gpu_max_cta_opt && (gpu_tot_issued_cta >= m_config.gpu_max_cta_opt) )

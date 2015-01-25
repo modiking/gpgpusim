@@ -35,6 +35,7 @@
 #include "gpgpu-sim/gpu-sim.h"
 #include "option_parser.h"
 #include <algorithm>
+#include "stdio.h"
 
 unsigned mem_access_t::sm_next_access_uid = 0;   
 unsigned warp_inst_t::sm_next_uid = 0;
@@ -592,13 +593,94 @@ const simt_mask_t &simt_stack::get_active_mask() const
     return m_stack.back().m_active_mask;
 }
 
-void simt_stack::get_pdom_stack_top_info( unsigned *pc, unsigned *rpc ) const
+void simt_stack::get_pdom_stack_top_info(unsigned *pc, unsigned *rpc ) const
 {
    assert(m_stack.size() > 0);
    *pc = m_stack.back().m_pc;
    *rpc = m_stack.back().m_recvg_pc;
 }
 
+//NEW function, go through stack, to get the active mask
+const simt_mask_t &simt_stack::iter_get_active_mask(signed depth) const
+{
+  if (depth >= m_stack.size())
+    return false;
+
+  assert(m_stack.size() > 0);
+  return m_stack.at(m_stack.size()-depth-1).m_active_mask;
+}
+
+//NEW function, go through the stack, if we hit size 1 returns FALSE
+bool simt_stack::iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const
+{
+
+  //printf("m_stack size = %d\n", m_stack.size());
+  //printf("bool eval = %d\n", depth >= m_stack.size());
+  //printf("m_stack.size()-depth-1 = %d\n", m_stack.size()-depth-1);
+  //check to make sure the entry exists
+  if (depth >= m_stack.size())
+    return false;
+
+  assert(m_stack.size() > 0);
+  *pc = m_stack.at(m_stack.size()-depth-1).m_pc;
+  *rpc = m_stack.at(m_stack.size()-depth-1).m_recvg_pc;
+
+  return true;
+}
+
+//NEW function, iterate through stack and find fragments
+std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
+{
+    std::deque<simt_mask_t> fragment_mask;
+    fragment_entry new_fragment_entry;
+
+    m_fragment_entries.clear();
+
+    //if there is only 1 entry, it automatically is a fragment
+
+    //iterate from top of the stack down to bottom
+    for (int i = m_stack.size()-1; i >= 0; i--)
+    {
+      //if the stack doesn't have a divergence tagged, we add it as executable
+      //a 0 means its not a diverged branch
+      if (m_stack.at(i).m_branch_div_cycle == 0)
+      {
+        new_fragment_entry.pc = m_stack.at(i).m_pc;
+        new_fragment_entry.depth = m_stack.size()-i-1;
+        m_fragment_entries.push_back(new_fragment_entry);
+        fragment_mask.push_back(m_stack.at(i).m_active_mask);
+      }
+    }
+
+    //TEST code: print out fragments if there are more than 2
+    //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
+    /*
+    if (m_fragment_entries.size() > 1){
+      printf("Test Code\n");
+      printf("SIMT stack state:\n");
+      //print to stdout
+      simt_stack::print(stdout);
+      for (int j = m_fragment_entries.size() - 1; j >= 0 ; j--){
+        printf("Depth (%d): PC = %s\n", m_fragment_entries.at(j).depth, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
+        printf("Mask: ");
+        for (unsigned i=0; i<m_warp_size; i++)
+            printf("%c", (fragment_mask.at(j).test(i)?'1':'0') );
+        printf("\n");
+      }
+    }*/
+
+    simt_mask_t composite_mask = 0;
+    //sanity check on fragments to make sure they're disjoint
+    for (int j = 0; j < fragment_mask.size(); j++){
+      //if a 1 bit shows up (collision in mask)
+      //want negative assertion because any() returns a 0 when the vector is 0, which is
+      //the correct behavior
+      assert(!(composite_mask & fragment_mask.at(j)).any());
+      composite_mask |= fragment_mask.at(j);
+    }
+
+    return m_fragment_entries;
+}
 unsigned simt_stack::get_rp() const 
 { 
     assert(m_stack.size() > 0);
@@ -632,7 +714,7 @@ void simt_stack::print (FILE *fout) const
     }
 }
 
-void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op )
+void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId)
 {
     assert(m_stack.size() > 0);
 
@@ -642,6 +724,9 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
     address_type top_recvg_pc = m_stack.back().m_recvg_pc;
     address_type top_pc = m_stack.back().m_pc; // the pc of the instruction just executed
     stack_entry_type top_type = m_stack.back().m_type;
+
+    //new code
+    int old_stack_size = m_stack.size();
 
     assert(top_active_mask.any());
 
@@ -738,7 +823,29 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
         m_stack.push_back(simt_stack_entry());
     }
     assert(m_stack.size() > 0);
+    //NEW CODE
+    //track stack size in order to determine when divergence occurs/is resolved
+    //a larger old value means we have "popped" off the stack
+    /*
+    if (old_stack_size > m_stack.size()-1) {
+        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
+        fprintf(Divergence_Print_File1, "Warp %d has reconverged, Divergence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
+        print(Divergence_Print_File1);
+        fclose(Divergence_Print_File1);
+    }
+    */
+
     m_stack.pop_back();
+
+    /*
+    //a smaller old value means we have added to the stack
+    if(old_stack_size < m_stack.size()){
+        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
+        fprintf(Divergence_Print_File1, "Warp %d has diverged, Diverence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
+        print(Divergence_Print_File1);
+        fclose(Divergence_Print_File1);
+    }
+    */
 
 
     if (warp_diverged) {
@@ -781,7 +888,7 @@ void core_t::updateSIMTStack(unsigned warpId, warp_inst_t * inst)
             next_pc.push_back( m_thread[wtid+i]->get_pc() );
         }
     }
-    m_simt_stack[warpId]->update(thread_done,next_pc,inst->reconvergence_pc, inst->op);
+    m_simt_stack[warpId]->update(thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId);
 }
 
 //! Get the warp to be executed using the data taken form the SIMT stack

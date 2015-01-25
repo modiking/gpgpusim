@@ -22,6 +22,11 @@ __global__ void
 Kernel( Node* g_graph_nodes, int* g_graph_edges, bool* g_graph_mask, bool* g_graph_visited, int* g_cost, bool *g_over, int no_of_nodes) 
 {
 	int tid = blockIdx.x*MAX_THREADS_PER_BLOCK + threadIdx.x;
+    //sanity check on tid (less than number of total nodes)
+    //mask check is used to check if this vertex is on the frontier (a vertex given to every thread)
+    //only when the vertex is on the frontier does it execute
+    //however, all this information is stored in the SAME set in global memory
+    //and only some threads run at a time (branch divergence with only 1 branch)
 	if( tid<no_of_nodes && g_graph_mask[tid])
 	{
 		g_graph_mask[tid]=false;

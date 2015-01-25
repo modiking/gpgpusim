@@ -13,19 +13,19 @@ noinline?=0
 
 .PHONY: check_environment
 default: check_environment common 
-	$(SETENV) make noinline=$(noinline) -C AES
+	#$(SETENV) make noinline=$(noinline) -C AES
 	$(SETENV) make noinline=$(noinline) -C BFS
 	cd CP; export PARBOIL_ROOT=`pwd`; cd common/src; make; cd -; ./parboil compile cp cuda_short; cp benchmarks/cp/build/cuda_short/cp $(BINDIR)/$(BINSUBDIR)/CP 
-	$(SETENV) make noinline=$(noinline) -C DG/3rdParty/ParMetis-3.1
-	$(SETENV) make noinline=$(noinline) -C DG
-	$(SETENV) make noinline=$(noinline) -C LIB
-	$(SETENV) make noinline=$(noinline) -C LPS
-	$(SETENV) make noinline=$(noinline) -C MUM
-	$(SETENV) make noinline=$(noinline) -C NN
-	$(SETENV) make noinline=$(noinline) -C NQU
+	#$(SETENV) make noinline=$(noinline) -C DG/3rdParty/ParMetis-3.1
+	#$(SETENV) make noinline=$(noinline) -C DG
+	#$(SETENV) make noinline=$(noinline) -C LIB
+	#$(SETENV) make noinline=$(noinline) -C LPS
+	#$(SETENV) make noinline=$(noinline) -C MUM
+	#$(SETENV) make noinline=$(noinline) -C NN
+	#$(SETENV) make noinline=$(noinline) -C NQU
 	$(SETENV) make noinline=$(noinline) -C RAY
-	$(SETENV) make noinline=$(noinline) -C STO
-	$(SETENV) make noinline=$(noinline) -C WP
+	#$(SETENV) make noinline=$(noinline) -C STO
+	#$(SETENV) make noinline=$(noinline) -C WP
 
 check_environment:
 	 @if [ ! -n "$(CUDA_INSTALL_PATH)" ]; then \

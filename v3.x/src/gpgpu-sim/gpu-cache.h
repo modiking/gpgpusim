@@ -37,6 +37,9 @@
 
 #include "addrdec.h"
 
+//NEW
+#include <deque>
+
 enum cache_block_state {
     INVALID,
     RESERVED,
@@ -146,12 +149,13 @@ public:
                           &mshr_type, &m_mshr_entries,&m_mshr_max_merge,
                           &m_miss_queue_size,&m_result_fifo_entries,
                           &m_data_port_width);
-
+	
         if ( ntok < 11 ) {
             if ( !strcmp(config,"none") ) {
                 m_disabled = true;
                 return;
             }
+			printf ("ntok:%d\n", ntok);
             exit_parse_error();
         }
         switch (rp) {
@@ -688,6 +692,54 @@ protected:
     read_only_cache( const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status, tag_array* new_tag_array )
     : baseline_cache(name,config,core_id,type_id,memport,status, new_tag_array){}
 };
+
+/// Banked read only cache
+//note that this is under the assumption that data is paritioned in the banks (4 way means address 0 goes to bank 0, 1 to bank 1 etc)
+/*class banked_read_only_cache {
+public:
+    //name, config, core_id, type_id, status are constant across every cache, since its banked the same memory port is also chared
+    //this creates N versions of the read only cache
+    banked_read_only_cache( const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status, int N )
+    {
+        for (int i = 0; i < N; i++){
+            //create N instances of memory, and push them back
+            m_read_only_caches.push_back(new read_only_cache(name, config, core_id, type_id, memport, status));
+        }
+
+        m_num_banks = N;
+    }
+
+    //main changes
+    //need new:
+    //fill
+    //access
+    //cycle
+    //access_ready
+    //next_access
+
+    void fill( mem_fetch *mf, unsigned time ){
+        //need to extract the PC in order to figure out which cache to actually fill to
+        //PC is taken with modulo in order to fill the correct bank
+        m_read_only_caches.at((mf->get_pc()) % m_num_banks).fill(mf, time);
+
+    }
+
+    /// Access cache for read_only_cache: returns RESERVATION_FAIL if request could not be accepted (for any reason)
+    virtual enum cache_request_status access( new_addr_type addr, mem_fetch *mf, unsigned time, std::list<cache_event> &events );
+
+    virtual ~banked_read_only_cache(){}
+
+    //member deque holding all the read only cache objects
+    //want this public in case we want to talk to the caches directly
+    std::deque<read_only_cache> m_read_only_caches;
+
+    unsigned m_num_banks;
+
+protected:
+
+    
+
+};*/
 
 /// Data cache - Implements common functions for L1 and L2 data cache
 class data_cache : public baseline_cache {

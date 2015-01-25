@@ -73,6 +73,12 @@
 //Set a hard limit of 32 CTAs per shader [cuda only has 8]
 #define MAX_CTA_PER_SHADER 32
 
+//NEW, max concurrent warp fragments per warp
+#define MAX_WARP_FRAGMENTS 4
+
+//NEW, pulled definition from inside of the warp_t object
+#define IBUFFER_SIZE 2
+
 class thread_ctx_t {
 public:
    unsigned m_cta_id; // hardware CTA this thread belongs
@@ -125,6 +131,7 @@ public:
         n_completed   -= active.count(); // active threads are not yet completed
         m_active_threads = active;
         m_done_exit=false;
+        m_frag_num=0;
     }
 
     bool functional_done() const;
@@ -157,35 +164,60 @@ public:
     address_type get_pc() const { return m_next_pc; }
     void set_next_pc( address_type pc ) { m_next_pc = pc; }
 
+
+    //NEW, ibuffer_next_frag
+    //increments fragment number to new fragment
+    void ibuffer_next_frag()
+    {
+        m_frag_num = (m_frag_num+1)%MAX_WARP_FRAGMENTS;
+
+    }
+
+    //NEW, ibuffer_frag_empty
+    //checks through the entire ibuffer to see if it is empty
+    bool ibuffer_frag_empty()
+    {
+        for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
+        {
+            for( unsigned i=0; i < IBUFFER_SIZE; i++)
+            { 
+                if(m_ibuffer[j][i].m_valid) 
+                    return false;
+            }
+        }
+
+        return true;
+    }
     void ibuffer_fill( unsigned slot, const warp_inst_t *pI )
     {
        assert(slot < IBUFFER_SIZE );
-       m_ibuffer[slot].m_inst=pI;
-       m_ibuffer[slot].m_valid=true;
+       m_ibuffer[m_frag_num][slot].m_inst=pI;
+       m_ibuffer[m_frag_num][slot].m_valid=true;
        m_next=0; 
     }
     bool ibuffer_empty() const
     {
         for( unsigned i=0; i < IBUFFER_SIZE; i++) 
-            if(m_ibuffer[i].m_valid) 
+            if(m_ibuffer[m_frag_num][i].m_valid) 
                 return false;
         return true;
     }
     void ibuffer_flush()
     {
         for(unsigned i=0;i<IBUFFER_SIZE;i++) {
-            if( m_ibuffer[i].m_valid )
+            if( m_ibuffer[m_frag_num][i].m_valid )
                 dec_inst_in_pipeline();
-            m_ibuffer[i].m_inst=NULL; 
-            m_ibuffer[i].m_valid=false; 
+            m_ibuffer[m_frag_num][i].m_inst=NULL; 
+            m_ibuffer[m_frag_num][i].m_valid=false; 
         }
     }
-    const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_next].m_inst; }
-    bool ibuffer_next_valid() { return m_ibuffer[m_next].m_valid; }
+    const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_frag_num][m_next].m_inst; }
+    bool ibuffer_next_valid() { return m_ibuffer[m_frag_num][m_next].m_valid; }
+    //requires new entry frag_num
     void ibuffer_free()
     {
-        m_ibuffer[m_next].m_inst = NULL;
-        m_ibuffer[m_next].m_valid = false;
+        m_ibuffer[m_frag_num][m_next].m_inst = NULL;
+        m_ibuffer[m_frag_num][m_next].m_valid = false;
     }
     void ibuffer_step() { m_next = (m_next+1)%IBUFFER_SIZE; }
 
@@ -215,7 +247,6 @@ public:
     unsigned get_warp_id() const { return m_warp_id; }
 
 private:
-    static const unsigned IBUFFER_SIZE=2;
     class shader_core_ctx *m_shader;
     unsigned m_cta_id;
     unsigned m_warp_id;
@@ -233,7 +264,12 @@ private:
        const warp_inst_t *m_inst;
        bool m_valid;
     };
-    ibuffer_entry m_ibuffer[IBUFFER_SIZE]; 
+
+    //NEW, internal variable to store fragment number
+    unsigned m_frag_num;
+
+    //NEW, 2D array to store fragment information
+    ibuffer_entry m_ibuffer[MAX_WARP_FRAGMENTS][IBUFFER_SIZE]; 
     unsigned m_next;
                                    
     unsigned m_n_atomic;           // number of outstanding atomic operations 
@@ -374,16 +410,16 @@ protected:
 
 class lrr_scheduler : public scheduler_unit {
 public:
-	lrr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+    lrr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                     Scoreboard* scoreboard, simt_stack** simt,
                     std::vector<shd_warp_t>* warp,
                     register_set* sp_out,
                     register_set* sfu_out,
                     register_set* mem_out,
                     int id )
-	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
-	virtual ~lrr_scheduler () {}
-	virtual void order_warps ();
+    : scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
+    virtual ~lrr_scheduler () {}
+    virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
     }
@@ -391,16 +427,16 @@ public:
 
 class gto_scheduler : public scheduler_unit {
 public:
-	gto_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+    gto_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                     Scoreboard* scoreboard, simt_stack** simt,
                     std::vector<shd_warp_t>* warp,
                     register_set* sp_out,
                     register_set* sfu_out,
                     register_set* mem_out,
                     int id )
-	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
-	virtual ~gto_scheduler () {}
-	virtual void order_warps ();
+    : scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
+    virtual ~gto_scheduler () {}
+    virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
     }
@@ -410,7 +446,7 @@ public:
 
 class two_level_active_scheduler : public scheduler_unit {
 public:
-	two_level_active_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+    two_level_active_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                           Scoreboard* scoreboard, simt_stack** simt,
                           std::vector<shd_warp_t>* warp,
                           register_set* sp_out,
@@ -418,8 +454,8 @@ public:
                           register_set* mem_out,
                           int id,
                           char* config_str )
-	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ),
-	  m_pending_warps() 
+    : scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ),
+      m_pending_warps() 
     {
         unsigned inner_level_readin;
         unsigned outer_level_readin; 
@@ -432,15 +468,15 @@ public:
         m_inner_level_prioritization=(scheduler_prioritization_type)inner_level_readin;
         m_outer_level_prioritization=(scheduler_prioritization_type)outer_level_readin;
     }
-	virtual ~two_level_active_scheduler () {}
+    virtual ~two_level_active_scheduler () {}
     virtual void order_warps();
-	void add_supervised_warp_id(int i) {
+    void add_supervised_warp_id(int i) {
         if ( m_next_cycle_prioritized_warps.size() < m_max_active_warps ) {
             m_next_cycle_prioritized_warps.push_back( &warp(i) );
         } else {
-		    m_pending_warps.push_back(&warp(i));
+            m_pending_warps.push_back(&warp(i));
         }
-	}
+    }
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
     }
@@ -451,16 +487,16 @@ protected:
                                     const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
 
 private:
-	std::deque< shd_warp_t* > m_pending_warps;
+    std::deque< shd_warp_t* > m_pending_warps;
     scheduler_prioritization_type m_inner_level_prioritization;
     scheduler_prioritization_type m_outer_level_prioritization;
-	unsigned m_max_active_warps;
+    unsigned m_max_active_warps;
 };
 
 // Static Warp Limiting Scheduler
 class swl_scheduler : public scheduler_unit {
 public:
-	swl_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+    swl_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                     Scoreboard* scoreboard, simt_stack** simt,
                     std::vector<shd_warp_t>* warp,
                     register_set* sp_out,
@@ -468,8 +504,8 @@ public:
                     register_set* mem_out,
                     int id,
                     char* config_string );
-	virtual ~swl_scheduler () {}
-	virtual void order_warps ();
+    virtual ~swl_scheduler () {}
+    virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
     }
@@ -798,10 +834,10 @@ private:
          m_not_ready.reset(op);
       }
       unsigned get_num_operands() const{
-    	  return m_warp->get_num_operands();
+          return m_warp->get_num_operands();
       }
       unsigned get_num_regs() const{
-    	  return m_warp->get_num_regs();
+          return m_warp->get_num_regs();
       }
       void dispatch();
       bool is_free(){return m_free;}
@@ -987,11 +1023,11 @@ public:
     virtual void issue( register_set& source_reg );
     virtual unsigned get_active_lanes_in_pipeline()
     {
-    	active_mask_t active_lanes;
-    	active_lanes.reset();
+        active_mask_t active_lanes;
+        active_lanes.reset();
         for( unsigned stage=0; (stage+1)<m_pipeline_depth; stage++ ){
-        	if( !m_pipeline_reg[stage]->empty() )
-        		active_lanes|=m_pipeline_reg[stage]->get_active_mask();
+            if( !m_pipeline_reg[stage]->empty() )
+                active_lanes|=m_pipeline_reg[stage]->get_active_mask();
         }
         return active_lanes.count();
     }
@@ -1205,7 +1241,7 @@ const char* const pipeline_stage_name_decode[] = {
 struct shader_core_config : public core_config
 {
     shader_core_config(){
-	pipeline_widths_string = NULL;
+    pipeline_widths_string = NULL;
     }
 
     void init()
@@ -1216,20 +1252,20 @@ struct shader_core_config : public core_config
         if(ntok != 2) {
            printf("GPGPU-Sim uArch: error while parsing configuration string gpgpu_shader_core_pipeline_opt\n");
            abort();
-	}
+    }
 
-	char* toks = new char[100];
-	char* tokd = toks;
-	strcpy(toks,pipeline_widths_string);
+    char* toks = new char[100];
+    char* tokd = toks;
+    strcpy(toks,pipeline_widths_string);
 
-	toks = strtok(toks,",");
-	for (unsigned i = 0; i < N_PIPELINE_STAGES; i++) { 
-	    assert(toks);
-	    ntok = sscanf(toks,"%d", &pipe_widths[i]);
-	    assert(ntok == 1); 
-	    toks = strtok(NULL,",");
-	}
-	delete[] tokd;
+    toks = strtok(toks,",");
+    for (unsigned i = 0; i < N_PIPELINE_STAGES; i++) { 
+        assert(toks);
+        ntok = sscanf(toks,"%d", &pipe_widths[i]);
+        assert(ntok == 1); 
+        toks = strtok(NULL,",");
+    }
+    delete[] tokd;
 
         if (n_thread_per_shader > MAX_THREAD_PER_SM) {
            printf("GPGPU-Sim uArch: Error ** increase MAX_THREAD_PER_SM in abstract_hardware_model.h from %u to %u\n", 
@@ -1326,12 +1362,12 @@ struct shader_core_config : public core_config
 
 struct shader_core_stats_pod {
 
-	void* shader_core_stats_pod_start[]; // DO NOT MOVE FROM THE TOP - spaceless pointer to the start of this structure
-	unsigned long long *shader_cycles;
+    void* shader_core_stats_pod_start[]; // DO NOT MOVE FROM THE TOP - spaceless pointer to the start of this structure
+    unsigned long long *shader_cycles;
     unsigned *m_num_sim_insn; // number of scalar thread instructions committed by this shader core
     unsigned *m_num_sim_winsn; // number of warp instructions committed by this shader core
-	unsigned *m_last_num_sim_insn;
-	unsigned *m_last_num_sim_winsn;
+    unsigned *m_last_num_sim_insn;
+    unsigned *m_last_num_sim_winsn;
     unsigned *m_num_decoded_insn; // number of instructions decoded by this shader core
     float *m_pipeline_duty_cycle;
     unsigned *m_num_FPdecoded_insn;
@@ -1517,21 +1553,21 @@ class shader_core_mem_fetch_allocator : public mem_fetch_allocator {
 public:
     shader_core_mem_fetch_allocator( unsigned core_id, unsigned cluster_id, const memory_config *config )
     {
-    	m_core_id = core_id;
-    	m_cluster_id = cluster_id;
-    	m_memory_config = config;
+        m_core_id = core_id;
+        m_cluster_id = cluster_id;
+        m_memory_config = config;
     }
     mem_fetch *alloc( new_addr_type addr, mem_access_type type, unsigned size, bool wr ) const 
     {
-    	mem_access_t access( type, addr, size, wr );
-    	mem_fetch *mf = new mem_fetch( access, 
-    				       NULL,
-    				       wr?WRITE_PACKET_SIZE:READ_PACKET_SIZE, 
-    				       -1, 
-    				       m_core_id, 
-    				       m_cluster_id,
-    				       m_memory_config );
-    	return mf;
+        mem_access_t access( type, addr, size, wr );
+        mem_fetch *mf = new mem_fetch( access, 
+                           NULL,
+                           wr?WRITE_PACKET_SIZE:READ_PACKET_SIZE, 
+                           -1, 
+                           m_core_id, 
+                           m_cluster_id,
+                           m_memory_config );
+        return mf;
     }
     
     mem_fetch *alloc( const warp_inst_t &inst, const mem_access_t &access ) const
@@ -1629,113 +1665,113 @@ public:
     void incload_stat() {m_stats->m_num_loadqueued_insn[m_sid]++;}
     void incstore_stat() {m_stats->m_num_storequeued_insn[m_sid]++;}
     void incialu_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_ialu_acesses[m_sid]=m_stats->m_num_ialu_acesses[m_sid]+active_count*latency
-		    + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_ialu_acesses[m_sid]=m_stats->m_num_ialu_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
         m_stats->m_num_ialu_acesses[m_sid]=m_stats->m_num_ialu_acesses[m_sid]+active_count*latency;
-		}
-	 }
+        }
+     }
     void inctex_stat(unsigned active_count,double latency){
-    	m_stats->m_num_tex_inst[m_sid]=m_stats->m_num_tex_inst[m_sid]+active_count*latency;
+        m_stats->m_num_tex_inst[m_sid]=m_stats->m_num_tex_inst[m_sid]+active_count*latency;
     }
     void incimul_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_imul_acesses[m_sid]=m_stats->m_num_imul_acesses[m_sid]+active_count*latency
-		    + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_imul_acesses[m_sid]=m_stats->m_num_imul_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
         m_stats->m_num_imul_acesses[m_sid]=m_stats->m_num_imul_acesses[m_sid]+active_count*latency;
-		}
-	 }
+        }
+     }
     void incimul24_stat(unsigned active_count,double latency) {
       if(m_config->gpgpu_clock_gated_lanes==false){
-   		m_stats->m_num_imul24_acesses[m_sid]=m_stats->m_num_imul24_acesses[m_sid]+active_count*latency
-		    + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
-		  m_stats->m_num_imul24_acesses[m_sid]=m_stats->m_num_imul24_acesses[m_sid]+active_count*latency;
-		}
-	 }
-	 void incimul32_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_imul32_acesses[m_sid]=m_stats->m_num_imul32_acesses[m_sid]+active_count*latency
-			 + inactive_lanes_accesses_sfu(active_count, latency);			
-		}else{
-		  m_stats->m_num_imul32_acesses[m_sid]=m_stats->m_num_imul32_acesses[m_sid]+active_count*latency;
-		}
-		//printf("Int_Mul -- Active_count: %d\n",active_count);
-	 }
-	 void incidiv_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_idiv_acesses[m_sid]=m_stats->m_num_idiv_acesses[m_sid]+active_count*latency
-			 + inactive_lanes_accesses_sfu(active_count, latency); 
-		}else {
-		  m_stats->m_num_idiv_acesses[m_sid]=m_stats->m_num_idiv_acesses[m_sid]+active_count*latency;
-		}
-	 }
-	 void incfpalu_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_fp_acesses[m_sid]=m_stats->m_num_fp_acesses[m_sid]+active_count*latency
-			 + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
+        m_stats->m_num_imul24_acesses[m_sid]=m_stats->m_num_imul24_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
+          m_stats->m_num_imul24_acesses[m_sid]=m_stats->m_num_imul24_acesses[m_sid]+active_count*latency;
+        }
+     }
+     void incimul32_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_imul32_acesses[m_sid]=m_stats->m_num_imul32_acesses[m_sid]+active_count*latency
+             + inactive_lanes_accesses_sfu(active_count, latency);          
+        }else{
+          m_stats->m_num_imul32_acesses[m_sid]=m_stats->m_num_imul32_acesses[m_sid]+active_count*latency;
+        }
+        //printf("Int_Mul -- Active_count: %d\n",active_count);
+     }
+     void incidiv_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_idiv_acesses[m_sid]=m_stats->m_num_idiv_acesses[m_sid]+active_count*latency
+             + inactive_lanes_accesses_sfu(active_count, latency); 
+        }else {
+          m_stats->m_num_idiv_acesses[m_sid]=m_stats->m_num_idiv_acesses[m_sid]+active_count*latency;
+        }
+     }
+     void incfpalu_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_fp_acesses[m_sid]=m_stats->m_num_fp_acesses[m_sid]+active_count*latency
+             + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
         m_stats->m_num_fp_acesses[m_sid]=m_stats->m_num_fp_acesses[m_sid]+active_count*latency;
-		} 
-	 }
-	 void incfpmul_stat(unsigned active_count,double latency) {
-		 		// printf("FP MUL stat increament\n");
+        } 
+     }
+     void incfpmul_stat(unsigned active_count,double latency) {
+                // printf("FP MUL stat increament\n");
       if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_fpmul_acesses[m_sid]=m_stats->m_num_fpmul_acesses[m_sid]+active_count*latency
-		    + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
+          m_stats->m_num_fpmul_acesses[m_sid]=m_stats->m_num_fpmul_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
         m_stats->m_num_fpmul_acesses[m_sid]=m_stats->m_num_fpmul_acesses[m_sid]+active_count*latency;
-		}
-	 }
-	 void incfpdiv_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_fpdiv_acesses[m_sid]=m_stats->m_num_fpdiv_acesses[m_sid]+active_count*latency
-			+ inactive_lanes_accesses_sfu(active_count, latency); 
-		}else {
-		  m_stats->m_num_fpdiv_acesses[m_sid]=m_stats->m_num_fpdiv_acesses[m_sid]+active_count*latency;
-		}
-	 }
-	 void inctrans_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_trans_acesses[m_sid]=m_stats->m_num_trans_acesses[m_sid]+active_count*latency
-			+ inactive_lanes_accesses_sfu(active_count, latency); 
-		}else{
-		  m_stats->m_num_trans_acesses[m_sid]=m_stats->m_num_trans_acesses[m_sid]+active_count*latency;
-		}
-	 }
+        }
+     }
+     void incfpdiv_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_fpdiv_acesses[m_sid]=m_stats->m_num_fpdiv_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_sfu(active_count, latency); 
+        }else {
+          m_stats->m_num_fpdiv_acesses[m_sid]=m_stats->m_num_fpdiv_acesses[m_sid]+active_count*latency;
+        }
+     }
+     void inctrans_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_trans_acesses[m_sid]=m_stats->m_num_trans_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_sfu(active_count, latency); 
+        }else{
+          m_stats->m_num_trans_acesses[m_sid]=m_stats->m_num_trans_acesses[m_sid]+active_count*latency;
+        }
+     }
 
-	 void incsfu_stat(unsigned active_count,double latency) {m_stats->m_num_sfu_acesses[m_sid]=m_stats->m_num_sfu_acesses[m_sid]+active_count*latency;}
-	 void incsp_stat(unsigned active_count,double latency) {m_stats->m_num_sp_acesses[m_sid]=m_stats->m_num_sp_acesses[m_sid]+active_count*latency;}
-	 void incmem_stat(unsigned active_count,double latency) {
-		if(m_config->gpgpu_clock_gated_lanes==false){
-		  m_stats->m_num_mem_acesses[m_sid]=m_stats->m_num_mem_acesses[m_sid]+active_count*latency
-		    + inactive_lanes_accesses_nonsfu(active_count, latency);
-		}else {
-		  m_stats->m_num_mem_acesses[m_sid]=m_stats->m_num_mem_acesses[m_sid]+active_count*latency;
-		}
-	 }
-	 void incexecstat(warp_inst_t *&inst);
+     void incsfu_stat(unsigned active_count,double latency) {m_stats->m_num_sfu_acesses[m_sid]=m_stats->m_num_sfu_acesses[m_sid]+active_count*latency;}
+     void incsp_stat(unsigned active_count,double latency) {m_stats->m_num_sp_acesses[m_sid]=m_stats->m_num_sp_acesses[m_sid]+active_count*latency;}
+     void incmem_stat(unsigned active_count,double latency) {
+        if(m_config->gpgpu_clock_gated_lanes==false){
+          m_stats->m_num_mem_acesses[m_sid]=m_stats->m_num_mem_acesses[m_sid]+active_count*latency
+            + inactive_lanes_accesses_nonsfu(active_count, latency);
+        }else {
+          m_stats->m_num_mem_acesses[m_sid]=m_stats->m_num_mem_acesses[m_sid]+active_count*latency;
+        }
+     }
+     void incexecstat(warp_inst_t *&inst);
 
-	 void incregfile_reads(unsigned active_count) {m_stats->m_read_regfile_acesses[m_sid]=m_stats->m_read_regfile_acesses[m_sid]+active_count;}
-	 void incregfile_writes(unsigned active_count){m_stats->m_write_regfile_acesses[m_sid]=m_stats->m_write_regfile_acesses[m_sid]+active_count;}
-	 void incnon_rf_operands(unsigned active_count){m_stats->m_non_rf_operands[m_sid]=m_stats->m_non_rf_operands[m_sid]+active_count;}
+     void incregfile_reads(unsigned active_count) {m_stats->m_read_regfile_acesses[m_sid]=m_stats->m_read_regfile_acesses[m_sid]+active_count;}
+     void incregfile_writes(unsigned active_count){m_stats->m_write_regfile_acesses[m_sid]=m_stats->m_write_regfile_acesses[m_sid]+active_count;}
+     void incnon_rf_operands(unsigned active_count){m_stats->m_non_rf_operands[m_sid]=m_stats->m_non_rf_operands[m_sid]+active_count;}
 
-	 void incspactivelanes_stat(unsigned active_count) {m_stats->m_active_sp_lanes[m_sid]=m_stats->m_active_sp_lanes[m_sid]+active_count;}
-	 void incsfuactivelanes_stat(unsigned active_count) {m_stats->m_active_sfu_lanes[m_sid]=m_stats->m_active_sfu_lanes[m_sid]+active_count;}
-	 void incfuactivelanes_stat(unsigned active_count) {m_stats->m_active_fu_lanes[m_sid]=m_stats->m_active_fu_lanes[m_sid]+active_count;}
-	 void incfumemactivelanes_stat(unsigned active_count) {m_stats->m_active_fu_mem_lanes[m_sid]=m_stats->m_active_fu_mem_lanes[m_sid]+active_count;}
+     void incspactivelanes_stat(unsigned active_count) {m_stats->m_active_sp_lanes[m_sid]=m_stats->m_active_sp_lanes[m_sid]+active_count;}
+     void incsfuactivelanes_stat(unsigned active_count) {m_stats->m_active_sfu_lanes[m_sid]=m_stats->m_active_sfu_lanes[m_sid]+active_count;}
+     void incfuactivelanes_stat(unsigned active_count) {m_stats->m_active_fu_lanes[m_sid]=m_stats->m_active_fu_lanes[m_sid]+active_count;}
+     void incfumemactivelanes_stat(unsigned active_count) {m_stats->m_active_fu_mem_lanes[m_sid]=m_stats->m_active_fu_mem_lanes[m_sid]+active_count;}
 
-	 void inc_simt_to_mem(unsigned n_flits){ m_stats->n_simt_to_mem[m_sid] += n_flits; }
+     void inc_simt_to_mem(unsigned n_flits){ m_stats->n_simt_to_mem[m_sid] += n_flits; }
 
 private:
-	 unsigned inactive_lanes_accesses_sfu(unsigned active_count,double latency){
+     unsigned inactive_lanes_accesses_sfu(unsigned active_count,double latency){
       return  ( ((32-active_count)>>1)*latency) + ( ((32-active_count)>>3)*latency) + ( ((32-active_count)>>3)*latency);
-	 }
-	 unsigned inactive_lanes_accesses_nonsfu(unsigned active_count,double latency){
+     }
+     unsigned inactive_lanes_accesses_nonsfu(unsigned active_count,double latency){
       return  ( ((32-active_count)>>1)*latency);
-	 }
+     }
 
     int test_res_bus(int latency);
     void init_warps(unsigned cta_id, unsigned start_thread, unsigned end_thread);
@@ -1893,7 +1929,7 @@ public:
     }
     virtual void push(mem_fetch *mf) 
     {
-    	m_core->inc_simt_to_mem(mf->get_num_flits(true));
+        m_core->inc_simt_to_mem(mf->get_num_flits(true));
         m_cluster->icnt_inject_request_packet(mf);        
     }
 private:

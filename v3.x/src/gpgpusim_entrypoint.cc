@@ -94,6 +94,8 @@ bool g_sim_done = true;
 
 void *gpgpu_sim_thread_concurrent(void*)
 {
+    //MAIN LOOP OF PROGRAM
+  
     // concurrent kernel execution simulation thread
     do {
        if(g_debug_execution >= 3) {
