@@ -369,7 +369,7 @@ void warp_inst_t::print_memory_accesses(unsigned shader_id, unsigned long long c
 	//open file
 	fp = fopen(MEM_PRINT_FILE, "a");
 	
-	fprintf(fp,"Cycle %llu (Shader %d): ", cycle_count, shader_id);
+	fprintf(fp,"%llu (%d): ", cycle_count, shader_id);
 
     for( unsigned subwarp=0; subwarp <  warp_parts; subwarp++ ) {
 
@@ -399,7 +399,7 @@ void warp_inst_t::print_memory_accesses(unsigned shader_id, unsigned long long c
 				
 				//NEW STUFF, print memory addresses
 				//format is (thread, address)
-				fprintf(fp,"(%d,0x%08x) ", thread, addr);
+				fprintf(fp,"%d,0x%08x ", thread, addr);
 
             }
         }
