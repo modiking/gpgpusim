@@ -37,6 +37,9 @@
 
 #include "addrdec.h"
 
+//NEW: banked cache print debug flat
+#define BANKED_DEBUG 1
+
 enum cache_block_state {
     INVALID,
     RESERVED,
@@ -687,6 +690,115 @@ public:
 protected:
     read_only_cache( const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status, tag_array* new_tag_array )
     : baseline_cache(name,config,core_id,type_id,memport,status, new_tag_array){}
+};
+
+// Banked read only cache
+class banked_read_only_cache {
+public:
+	//exactly the same as read only cache implementation, except for a parameter to tell us how many banks to have
+	banked_read_only_cache( int banks, const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status )
+    {
+		//clear the deque
+		//printf("Got to banked cache initialization\n");
+		m_read_only_caches.clear();
+		
+		m_banks = banks;
+		
+		//create as many instances as needed
+		for (int i = 0; i < m_banks; i++){
+			read_only_cache *temp_cache = new read_only_cache(name, config, core_id, type_id, memport, status );
+			//push back on queue
+			//note that push_back makes a copy then pushes back, so we're free to delete afterwards
+			m_read_only_caches.push_back(temp_cache);
+			//deleting so we don't leak everywhere
+			//delete temp_cache;
+			//or not, apparently doesn't copy objects
+		}
+		
+		//printf("m_read_only_caches.size() = %d m_banks = %d\n", m_read_only_caches.size(), m_banks);
+		//check we only pushed back as many as we expected
+		assert((int) m_read_only_caches.size() == m_banks);
+		
+		
+	}
+	
+	//should release all member variables, so shouldn't leak
+	virtual ~banked_read_only_cache(){}
+	
+	//for access, we piggyback on the working read_only version, all we have to do is select the correct bank
+	enum cache_request_status access( new_addr_type addr, mem_fetch *mf, unsigned time, std::list<cache_event> &events )
+	{
+		//printf("Got to access\n");
+		//check to make sure modulo works correctly
+		assert((addr % m_banks) < m_read_only_caches.size());
+		
+		if (BANKED_DEBUG){
+			printf("Accessing Address 0x%08llx mapped to bank %lld\n", addr, addr % m_banks);
+		}
+		
+		//simple modulo to find correct bank to forward access
+		return m_read_only_caches.at(addr % m_banks)->access( addr, mf, time, events );
+	} 
+	
+	//note that this command cycles ALL banks at once, so should only be called once per cycle
+	void cycle()
+	{
+		//printf("Got to cycle\n");
+		for (int i = 0; i < m_banks; i++){
+			m_read_only_caches.at(i)->cycle();
+		}
+		
+	}
+	
+	//API is access_ready(bank #), iterate through all banks in higher code to call next_access(bank #)
+	//const means same location every time, which is not the case here now
+	bool access_ready(int bank){
+		assert (bank < m_banks);
+		return m_read_only_caches.at(bank)->access_ready();
+	}
+	
+	mem_fetch *next_access(int bank){
+		assert (bank < m_banks);
+		return m_read_only_caches.at(bank)->next_access();
+	}
+	
+	//Filling from memory now goes to one bank instead of entire cache
+	void fill(mem_fetch *mf, unsigned time){
+		//check to make sure modulo works correctly
+		assert((mf->get_addr() % m_banks) < m_read_only_caches.size());
+		
+		if (BANKED_DEBUG){
+			printf("Memory fetch from Address 0x%08llx mapped to bank %lld\n", mf->get_addr(), mf->get_addr() % m_banks);
+		}
+		
+		m_read_only_caches.at(mf->get_addr() % m_banks)->fill( mf, time);
+	}
+	
+	const cache_stats &get_stats(int bank) {
+		assert (bank < m_banks);
+        return m_read_only_caches.at(bank)->get_stats();
+    }
+    unsigned get_stats(int bank, enum mem_access_type *access_type, unsigned num_access_type, enum cache_request_status *access_status, unsigned num_access_status) {
+		assert (bank < m_banks);
+        return m_read_only_caches.at(bank)->get_stats(access_type, num_access_type, access_status, num_access_status);
+    }
+    void get_sub_stats(int bank, struct cache_sub_stats &css) {
+		assert (bank < m_banks);
+        m_read_only_caches.at(bank)->get_sub_stats(css);
+    }
+
+	void display_state(int bank, FILE *fp ) {
+		assert (bank < m_banks);
+        m_read_only_caches.at(bank)->display_state(fp);
+	}
+	
+	//have a function that can return the # of banks
+	int num_banks(){return m_banks;}
+private:
+	//list of cache banks
+	std::deque<read_only_cache*> m_read_only_caches;
+	
+	int m_banks;
 };
 
 /// Data cache - Implements common functions for L1 and L2 data cache

@@ -53,6 +53,7 @@
 
 //NEW STUFF, flag to determine whether to print some debug messages
 #define DEBUG_PRINT 0
+#define NUM_BANKS 1
     
 
 /////////////////////////////////////////////////////////////////////////////
@@ -120,8 +121,11 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
     #define STRSIZE 1024
     char name[STRSIZE];
     snprintf(name, STRSIZE, "L1I_%03d", m_sid);
-    m_L1I = new read_only_cache( name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
-    
+	
+    //m_L1I = new read_only_cache( name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
+    //NEW: create banked cache instead
+	m_L1I = new banked_read_only_cache( NUM_BANKS, name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
+	
     m_warp.resize(m_config->max_warps_per_shader, shd_warp_t(this, warp_size));
     m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader);
     
@@ -662,6 +666,7 @@ void shader_core_ctx::fetch()
                                               m_tpc,
                                               m_memory_config );
                 std::list<cache_event> events;
+				//NEW: even though we're using the banked cache, access API is stil the same
                 enum cache_request_status status = m_L1I->access( (new_addr_type)ppc, mf, gpu_sim_cycle+gpu_tot_sim_cycle,events);
                 if( status == MISS ) {
                     m_last_warp_fetched=warp_id;
@@ -682,13 +687,18 @@ void shader_core_ctx::fetch()
         }
     }
 
+	//NEW: for banked cache, this command cycles EVERY bank at oncec
     m_L1I->cycle();
 
-    if( m_L1I->access_ready() ) {
-        mem_fetch *mf = m_L1I->next_access();
-        m_warp[mf->get_wid()].clear_imiss_pending();
-        delete mf;
-    }
+	//NEW: instead of accessing once, we inquire about each access per bank and fill as needed
+	for (int i = 0 ; i < m_L1I->num_banks(); i++){
+	
+		if( m_L1I->access_ready(i) ) {
+			mem_fetch *mf = m_L1I->next_access(i);
+			m_warp[mf->get_wid()].clear_imiss_pending();
+			delete mf;
+		}
+	}
 }
 
 void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
@@ -853,7 +863,7 @@ void scheduler_unit::cycle()
         //exit if entire buffer is empty
         while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) ) {
 
-            //if current buffer is empty move on
+            //if CURRENT BUFFER for CURRENT WARP is empty move on
             if (warp(warp_id).ibuffer_empty()){
               depth++;
               warp(warp_id).ibuffer_next_frag();
@@ -2360,7 +2370,11 @@ void shader_core_ctx::display_pipeline(FILE *fout, int print_mem, int mask ) con
    dump_warp_state(fout);
    fprintf(fout,"\n");
 
-   m_L1I->display_state(fout);
+   //NEW, go through banks to display state
+   for (int i = 0; i < m_L1I->num_banks(); i++)
+   {
+	   m_L1I->display_state(i, fout);
+   }
 
    fprintf(fout, "IF/ID       = ");
    if( !m_inst_fetch_buffer.m_valid )
@@ -2801,13 +2815,20 @@ void shader_core_ctx::print_cache_stats( FILE *fp, unsigned& dl1_accesses, unsig
 
 void shader_core_ctx::get_cache_stats(cache_stats &cs){
     // Adds stats from each cache to 'cs'
-    cs += m_L1I->get_stats(); // Get L1I stats
+	//NEW: go through each bank
+	for (int i = 0; i < m_L1I->num_banks(); i++){
+		cs += m_L1I->get_stats(i); // Get L1I stats
+	}
     m_ldst_unit->get_cache_stats(cs); // Get L1D, L1C, L1T stats
 }
 
 void shader_core_ctx::get_L1I_sub_stats(struct cache_sub_stats &css) const{
-    if(m_L1I)
-        m_L1I->get_sub_stats(css);
+    if(m_L1I){
+		for (int i = 0; i < m_L1I->num_banks(); i++){
+			m_L1I->get_sub_stats(i, css);
+		}
+	}
+        
 }
 void shader_core_ctx::get_L1D_sub_stats(struct cache_sub_stats &css) const{
     m_ldst_unit->get_L1D_sub_stats(css);

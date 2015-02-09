@@ -39,7 +39,7 @@
 
 //NEW STUFF, name for print file to contain memory accesses
 #define MEM_PRINT_FILE "memory_access_info"
-#define PRINT_MEM_INFO 1
+#define PRINT_MEM_INFO 0
 
 //NEW STUFF, work-around way to make sure a new file is created every time to track memory accesses
 unsigned mem_file_created = 0;

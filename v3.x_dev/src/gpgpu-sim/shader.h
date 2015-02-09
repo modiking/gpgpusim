@@ -193,7 +193,7 @@ public:
        assert(slot < IBUFFER_SIZE );
        m_ibuffer[m_frag_num][slot].m_inst=pI;
        m_ibuffer[m_frag_num][slot].m_valid=true;
-       m_next=0; 
+       m_next=0; //we always fill entry 0, decode auto-shifts to slot 0 if we don't do double execution
     }
     bool ibuffer_empty() const
     {
@@ -219,6 +219,8 @@ public:
         m_ibuffer[m_frag_num][m_next].m_inst = NULL;
         m_ibuffer[m_frag_num][m_next].m_valid = false;
     }
+	
+	//called on do_on_warp_issued to step to next entry
     void ibuffer_step() { m_next = (m_next+1)%IBUFFER_SIZE; }
 
     bool imiss_pending() const { return m_imiss_pending; }
@@ -1828,7 +1830,8 @@ private:
     shader_core_mem_fetch_allocator *m_mem_fetch_allocator;
     
     // fetch
-    read_only_cache *m_L1I; // instruction cache
+	//NEW: used banked cache for instructions
+    banked_read_only_cache *m_L1I; // instruction cache
     int  m_last_warp_fetched;
 
     // decode/dispatch
