@@ -144,13 +144,13 @@ public:
         assert( config );
         char rp, wp, ap, mshr_type, wap;
 
-        int ntok = sscanf(config,"%u:%u:%u,%c:%c:%c:%c,%c:%u:%u,%u:%u,%u",
-                          &m_nset, &m_line_sz, &m_assoc, &rp, &wp, &ap, &wap,
+        int ntok = sscanf(config,"%u,%u:%u:%u,%c:%c:%c:%c,%c:%u:%u,%u:%u,%u",
+                          &m_banks, &m_nset, &m_line_sz, &m_assoc, &rp, &wp, &ap, &wap,
                           &mshr_type, &m_mshr_entries,&m_mshr_max_merge,
                           &m_miss_queue_size,&m_result_fifo_entries,
                           &m_data_port_width);
 
-        if ( ntok < 11 ) {
+        if ( ntok < 12 ) {
             if ( !strcmp(config,"none") ) {
                 m_disabled = true;
                 return;
@@ -176,10 +176,17 @@ public:
         default: exit_parse_error();
         }
         switch (mshr_type) {
-        case 'F': m_mshr_type = TEX_FIFO; assert(ntok==12); break;
+        case 'F': m_mshr_type = TEX_FIFO; assert(ntok==13); break;
         case 'A': m_mshr_type = ASSOC; break;
         default: exit_parse_error();
         }
+		
+		//NEW: divide sets by banking
+		if (m_banks == 0){
+			exit_parse_error();
+		}
+		m_nset = m_nset/m_banks;
+		
         m_line_sz_log2 = LOGB2(m_line_sz);
         m_nset_log2 = LOGB2(m_nset);
         m_valid = true;
@@ -221,6 +228,21 @@ public:
         assert( m_valid );
         return m_nset * m_assoc;
     }
+	
+	//NEW: create a function to get number of banks
+	unsigned get_banks() const 
+	{ 
+		assert( m_valid );
+		return m_banks;
+	}
+	
+	//NEW: function to get number of sets
+	unsigned get_sets() const
+	{
+		assert( m_valid );
+		return m_nset;
+		
+	}
 
     void print( FILE *fp ) const
     {
@@ -267,6 +289,9 @@ protected:
     unsigned m_nset;
     unsigned m_nset_log2;
     unsigned m_assoc;
+	
+	//NEW: member variable to keep track of bank count
+	unsigned m_banks;
 
     enum replacement_policy_t m_replacement_policy; // 'L' = LRU, 'F' = FIFO
     enum write_policy_t m_write_policy;             // 'T' = write through, 'B' = write back, 'R' = read only
@@ -696,13 +721,17 @@ protected:
 class banked_read_only_cache {
 public:
 	//exactly the same as read only cache implementation, except for a parameter to tell us how many banks to have
-	banked_read_only_cache( int banks, const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status )
+	banked_read_only_cache(const char *name, cache_config &config, int core_id, int type_id, mem_fetch_interface *memport, enum mem_fetch_status status )
     {
 		//clear the deque
 		//printf("Got to banked cache initialization\n");
 		m_read_only_caches.clear();
 		
-		m_banks = banks;
+		m_banks = config.get_banks();
+		
+		//calculate the offset: line_sz*number of sets
+		//in order to find the first bits of index to do banking
+		m_bit_offset = config.get_line_sz()*config.get_sets();
 		
 		//create as many instances as needed
 		for (int i = 0; i < m_banks; i++){
@@ -720,6 +749,8 @@ public:
 		assert((int) m_read_only_caches.size() == m_banks);
 		
 		
+		
+		
 	}
 	
 	//should release all member variables, so shouldn't leak
@@ -730,14 +761,14 @@ public:
 	{
 		//printf("Got to access\n");
 		//check to make sure modulo works correctly
-		assert((addr % m_banks) < m_read_only_caches.size());
+		assert(((addr/m_bit_offset) % m_banks) < m_read_only_caches.size());
 		
 		if (BANKED_DEBUG){
-			printf("Accessing Address 0x%08llx mapped to bank %lld\n", addr, addr % m_banks);
+			printf("Accessing Address 0x%08llx mapped to bank %lld\n", addr, (addr/m_bit_offset) % m_banks);
 		}
 		
 		//simple modulo to find correct bank to forward access
-		return m_read_only_caches.at(addr % m_banks)->access( addr, mf, time, events );
+		return m_read_only_caches.at((addr/m_bit_offset) % m_banks)->access( addr, mf, time, events );
 	} 
 	
 	//note that this command cycles ALL banks at once, so should only be called once per cycle
@@ -765,13 +796,13 @@ public:
 	//Filling from memory now goes to one bank instead of entire cache
 	void fill(mem_fetch *mf, unsigned time){
 		//check to make sure modulo works correctly
-		assert((mf->get_addr() % m_banks) < m_read_only_caches.size());
+		assert(((mf->get_addr()/m_bit_offset) % m_banks) < m_read_only_caches.size());
 		
 		if (BANKED_DEBUG){
-			printf("Memory fetch from Address 0x%08llx mapped to bank %lld\n", mf->get_addr(), mf->get_addr() % m_banks);
+			printf("Memory fetch from Address 0x%08llx mapped to bank %lld\n", mf->get_addr(), (mf->get_addr()/m_bit_offset) % m_banks);
 		}
 		
-		m_read_only_caches.at(mf->get_addr() % m_banks)->fill( mf, time);
+		m_read_only_caches.at((mf->get_addr()/m_bit_offset) % m_banks)->fill( mf, time);
 	}
 	
 	const cache_stats &get_stats(int bank) {
@@ -798,7 +829,8 @@ private:
 	//list of cache banks
 	std::deque<read_only_cache*> m_read_only_caches;
 	
-	int m_banks;
+	int m_banks; //number of banks
+	int m_bit_offset; //value to divide address by to get first indexing bit
 };
 
 /// Data cache - Implements common functions for L1 and L2 data cache

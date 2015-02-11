@@ -53,7 +53,6 @@
 
 //NEW STUFF, flag to determine whether to print some debug messages
 #define DEBUG_PRINT 0
-#define NUM_BANKS 1
     
 
 /////////////////////////////////////////////////////////////////////////////
@@ -124,7 +123,7 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
 	
     //m_L1I = new read_only_cache( name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
     //NEW: create banked cache instead
-	m_L1I = new banked_read_only_cache( NUM_BANKS, name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
+	m_L1I = new banked_read_only_cache( name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
 	
     m_warp.resize(m_config->max_warps_per_shader, shd_warp_t(this, warp_size));
     m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader);
