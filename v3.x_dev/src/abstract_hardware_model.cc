@@ -676,7 +676,7 @@ void simt_stack::get_pdom_stack_top_info(unsigned *pc, unsigned *rpc ) const
 }
 
 //NEW function, go through stack, to get the active mask
-const simt_mask_t &simt_stack::iter_get_active_mask(signed depth) const
+const simt_mask_t &simt_stack::iter_get_active_mask(unsigned depth) const
 {
   if (depth >= m_stack.size())
     return false;
@@ -686,7 +686,7 @@ const simt_mask_t &simt_stack::iter_get_active_mask(signed depth) const
 }
 
 //NEW function, go through the stack, if we hit size 1 returns FALSE
-bool simt_stack::iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const
+bool simt_stack::iter_get_pdom_stack(unsigned depth, unsigned *pc, unsigned *rpc ) const
 {
 
   //printf("m_stack size = %d\n", m_stack.size());
@@ -787,6 +787,185 @@ void simt_stack::print (FILE *fout) const
         ptx_print_insn( stack_entry.m_pc, fout );
         fprintf(fout,"\n");
     }
+}
+
+void simt_stack::remove_to_depth(unsigned depth){
+	//depth starts at 0 up to m_stack.size() - 1
+	assert (depth < m_stack.size());
+	
+	m_temp_stack.clear();
+	
+	//pop from back of main stack, push to back
+	for (int i = 0; i < depth; i++){
+		m_temp_stack.push_back(m_stack.back());
+		m_stack.pop_back();
+	}
+}
+
+void simt_stack::add_back_top(){
+	
+	//to re-integrate, pop back from temp into main stack
+	for (int i = 0; i < m_temp_stack.size(); i++){
+		m_stack.push_back(m_temp_stack.back());
+		m_temp_stack.pop_back();
+	}
+	
+	//make sure we got every member
+	assert(m_temp_stack.size() == 0);
+}
+
+void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId)
+{
+    assert(m_stack.size() > 0);
+
+    assert( next_pc.size() == m_warp_size );
+	
+	//easiest way to update specific entries is to pop the stack back to the entry
+	//manipulate it as if it was the top, then re-add the entries back
+	remove_to_depth(depth);
+
+	//proceed along normally
+    simt_mask_t  top_active_mask = m_stack.back().m_active_mask;
+    address_type top_recvg_pc = m_stack.back().m_recvg_pc;
+    address_type top_pc = m_stack.back().m_pc; // the pc of the instruction just executed
+    stack_entry_type top_type = m_stack.back().m_type;
+
+    //new code
+    int old_stack_size = m_stack.size();
+
+    assert(top_active_mask.any());
+
+    const address_type null_pc = -1;
+    bool warp_diverged = false;
+    address_type new_recvg_pc = null_pc;
+    while (top_active_mask.any()) {
+
+        // extract a group of threads with the same next PC among the active threads in the warp
+        address_type tmp_next_pc = null_pc;
+        simt_mask_t tmp_active_mask;
+        for (int i = m_warp_size - 1; i >= 0; i--) {
+            if ( top_active_mask.test(i) ) { // is this thread active?
+                if (thread_done.test(i)) {
+                    top_active_mask.reset(i); // remove completed thread from active mask
+                } else if (tmp_next_pc == null_pc) {
+                    tmp_next_pc = next_pc[i];
+                    tmp_active_mask.set(i);
+                    top_active_mask.reset(i);
+                } else if (tmp_next_pc == next_pc[i]) {
+                    tmp_active_mask.set(i);
+                    top_active_mask.reset(i);
+                }
+            }
+        }
+
+        if(tmp_next_pc == null_pc) {
+            assert(!top_active_mask.any()); // all threads done
+            continue;
+        }
+
+        // HANDLE THE SPECIAL CASES FIRST
+        if (next_inst_op== CALL_OPS)
+        {
+            // Since call is not a divergent instruction, all threads should have executed a call instruction
+            assert(top_active_mask.any() == false);
+
+            simt_stack_entry new_stack_entry;
+            new_stack_entry.m_pc = tmp_next_pc;
+            new_stack_entry.m_active_mask = tmp_active_mask;
+            new_stack_entry.m_branch_div_cycle = gpu_sim_cycle+gpu_tot_sim_cycle;
+            new_stack_entry.m_type = STACK_ENTRY_TYPE_CALL;
+            m_stack.push_back(new_stack_entry);
+			
+			//before every return, return stack to the way it was
+			add_back_top();
+            return;
+
+        } else if(next_inst_op == RET_OPS && top_type==STACK_ENTRY_TYPE_CALL) {
+            // pop the CALL Entry
+            assert(top_active_mask.any() == false);
+            m_stack.pop_back();
+
+            assert(m_stack.size() > 0);
+            m_stack.back().m_pc=tmp_next_pc;// set the PC of the stack top entry to return PC from  the call stack;
+            // Check if the New top of the stack is reconverging
+            if (tmp_next_pc == m_stack.back().m_recvg_pc && m_stack.back().m_type!=STACK_ENTRY_TYPE_CALL)
+            {
+                assert(m_stack.back().m_type==STACK_ENTRY_TYPE_NORMAL);
+                m_stack.pop_back();
+            }
+			
+			//before every return, return stack to the way it was
+			add_back_top();
+            return;
+        }
+
+        // discard the new entry if its PC matches with reconvergence PC
+        // that automatically reconverges the entry
+        // If the top stack entry is CALL, dont reconverge.
+        if (tmp_next_pc == top_recvg_pc && (top_type != STACK_ENTRY_TYPE_CALL)) continue;
+
+        // this new entry is not converging
+        // if this entry does not include thread from the warp, divergence occurs
+        if (top_active_mask.any() && !warp_diverged ) {
+            warp_diverged = true;
+            // modify the existing top entry into a reconvergence entry in the pdom stack
+            new_recvg_pc = recvg_pc;
+            if (new_recvg_pc != top_recvg_pc) {
+                m_stack.back().m_pc = new_recvg_pc;
+                m_stack.back().m_branch_div_cycle = gpu_sim_cycle+gpu_tot_sim_cycle;
+
+                m_stack.push_back(simt_stack_entry());
+            }
+        }
+
+        // discard the new entry if its PC matches with reconvergence PC
+        if (warp_diverged && tmp_next_pc == new_recvg_pc) continue;
+
+        // update the current top of pdom stack
+        m_stack.back().m_pc = tmp_next_pc;
+        m_stack.back().m_active_mask = tmp_active_mask;
+        if (warp_diverged) {
+            m_stack.back().m_calldepth = 0;
+            m_stack.back().m_recvg_pc = new_recvg_pc;
+        } else {
+            m_stack.back().m_recvg_pc = top_recvg_pc;
+        }
+
+        m_stack.push_back(simt_stack_entry());
+    }
+    assert(m_stack.size() > 0);
+    //NEW CODE
+    //track stack size in order to determine when divergence occurs/is resolved
+    //a larger old value means we have "popped" off the stack
+    /*
+    if (old_stack_size > m_stack.size()-1) {
+        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
+        fprintf(Divergence_Print_File1, "Warp %d has reconverged, Divergence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
+        print(Divergence_Print_File1);
+        fclose(Divergence_Print_File1);
+    }
+    */
+
+    m_stack.pop_back();
+
+    /*
+    //a smaller old value means we have added to the stack
+    if(old_stack_size < m_stack.size()){
+        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
+        fprintf(Divergence_Print_File1, "Warp %d has diverged, Diverence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
+        print(Divergence_Print_File1);
+        fclose(Divergence_Print_File1);
+    }
+    */
+
+
+    if (warp_diverged) {
+        ptx_file_line_stats_add_warp_divergence(top_pc, 1); 
+    }
+	
+	//before every return, return stack to the way it was
+	add_back_top();
+	return;
 }
 
 void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId)
@@ -963,7 +1142,28 @@ void core_t::updateSIMTStack(unsigned warpId, warp_inst_t * inst)
             next_pc.push_back( m_thread[wtid+i]->get_pc() );
         }
     }
+	
     m_simt_stack[warpId]->update(thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId);
+}
+
+void core_t::updateSIMTStack_depth(unsigned depth, unsigned warpId, warp_inst_t * inst)
+{
+	simt_mask_t thread_done;
+    addr_vector_t next_pc;
+    unsigned wtid = warpId * m_warp_size;
+    for (unsigned i = 0; i < m_warp_size; i++) {
+        if( ptx_thread_done(wtid+i) ) {
+            thread_done.set(i);
+            next_pc.push_back( (address_type)-1 );
+        } else {
+            if( inst->reconvergence_pc == RECONVERGE_RETURN_PC ) 
+                inst->reconvergence_pc = get_return_pc(m_thread[wtid+i]);
+            next_pc.push_back( m_thread[wtid+i]->get_pc() );
+        }
+    }
+	
+	//utilize the new one instead
+	m_simt_stack[warpId]->update_depth(depth, thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId);
 }
 
 //! Get the warp to be executed using the data taken form the SIMT stack

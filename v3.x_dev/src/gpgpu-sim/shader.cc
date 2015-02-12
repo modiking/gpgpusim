@@ -727,7 +727,8 @@ void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
     else if( next_inst->op == MEMORY_BARRIER_OP ) 
         m_warp[warp_id].set_membar();
 
-    updateSIMTStack(warp_id,*pipe_reg);
+	//now takes into account depth
+    updateSIMTStack_depth(0, warp_id,*pipe_reg);
     m_scoreboard->reserveRegisters(*pipe_reg);
     m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
 }

@@ -284,22 +284,30 @@ public:
     void reset();
     void launch( address_type start_pc, const simt_mask_t &active_mask );
     void update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId );
-
+	
+	//NEW counterpart, allows you to manipulate the stack at a specific depth
+	void update_depth( unsigned depth, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId);
+	
     const simt_mask_t &get_active_mask() const;
     void     get_pdom_stack_top_info( unsigned *pc, unsigned *rpc ) const;
     unsigned get_rp() const;
     void     print(FILE*fp) const;
 
     //NEW functions
-    bool     iter_get_pdom_stack(signed depth, unsigned *pc, unsigned *rpc ) const;
-    const simt_mask_t &iter_get_active_mask(signed depth) const;
+    bool     iter_get_pdom_stack(unsigned depth, unsigned *pc, unsigned *rpc ) const;
+    const simt_mask_t &iter_get_active_mask(unsigned depth) const;
 
     //NEW structure to store fragments
     struct fragment_entry {
         address_type pc;
-        signed depth;
+        unsigned depth;
     };
     std::deque<fragment_entry> get_fragments();
+	
+	//NEW functions: store top of stack temporarily to allow depth manipulations in update
+	void remove_to_depth(unsigned depth);
+
+	void add_back_top();
 
 protected:
     unsigned m_warp_id;
@@ -322,6 +330,8 @@ protected:
     };
 
     std::deque<simt_stack_entry> m_stack;
+	//NEW, temporary stack to hold entries
+	std::deque<simt_stack_entry> m_temp_stack;
     std::deque<fragment_entry> m_fragment_entries;
 
 };
@@ -1014,7 +1024,9 @@ class core_t {
         class gpgpu_sim * get_gpu() {return m_gpu;}
         void execute_warp_inst_t(warp_inst_t &inst, unsigned warpId =(unsigned)-1);
         bool  ptx_thread_done( unsigned hw_thread_id ) const ;
-        void updateSIMTStack(unsigned warpId, warp_inst_t * inst);
+		//NEW: modified to update at a specific depth
+        void updateSIMTStack_depth(unsigned depth, unsigned warpId, warp_inst_t * inst);
+		void updateSIMTStack(unsigned warpId, warp_inst_t * inst);
         void initilizeSIMTStack(unsigned warp_count, unsigned warps_size);
         void deleteSIMTStack();
         warp_inst_t getExecuteWarp(unsigned warpId);
