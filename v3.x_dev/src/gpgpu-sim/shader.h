@@ -106,7 +106,11 @@ public:
     {
         assert( m_stores_outstanding==0);
         assert( m_inst_in_pipeline==0);
-        m_imiss_pending=false;
+		
+        for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			m_imiss_valid[i] = false;
+		}
+		
         m_warp_id=(unsigned)-1;
         m_dynamic_warp_id = (unsigned)-1;
         n_completed = m_warp_size; 
@@ -172,6 +176,15 @@ public:
         m_frag_num = (m_frag_num+1)%MAX_WARP_FRAGMENTS;
 
     }
+	
+	//NEW, ibuffer_reset_frag()
+	//resets fragment count to 0
+	void ibuffer_reset_frag()
+    {
+        m_frag_num = 0;
+
+    }
+	
 
     //NEW, ibuffer_frag_empty
     //checks through the entire ibuffer to see if it is empty
@@ -223,9 +236,60 @@ public:
 	//called on do_on_warp_issued to step to next entry
     void ibuffer_step() { m_next = (m_next+1)%IBUFFER_SIZE; }
 
-    bool imiss_pending() const { return m_imiss_pending; }
-    void set_imiss_pending() { m_imiss_pending=true; }
-    void clear_imiss_pending() { m_imiss_pending=false; }
+	//NEW, have to go through the entire array and see if there are any valid entries
+    bool imiss_pending() 
+	{  
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			if (m_imiss_valid[i] == true){
+				return true;
+			}
+		}
+		
+		//otherwise there are no pending requests
+		return false;
+	
+	}
+	
+	//NEW, we find an empty spot in the array and store the PC we need
+	//this will send duplicate requests to the cache, which SHOULD respond back with duplicate requests back
+    void set_imiss_pending(address_type addr) 
+	{ 
+		//printf("Warp %u: Setting missing address %llx\n", m_warp_id, addr);
+		//find an empty entry, fill it
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			if (m_imiss_valid[i] == false){
+				m_imiss_adresses[i] = addr;
+				m_imiss_valid[i] = true;
+				return;
+			}
+		}
+		
+		//we should ALWAYS be able to find a missing entry
+		//because a warp will not call for more fetches again until all of its previous ones have been fetched
+		//therefore if we're here there's an error
+		printf("GPGPU-Sim Shader: Could not reserve new instruction miss pending buffer\n");
+		abort();
+	}
+	
+	//NEW, clear a single entry instead of the entire warp
+	//we clear based off of address, duplicate addresses get cleared as many times as needed
+    void clear_imiss_pending(address_type addr) 
+	{ 
+		//printf("Warp %u: Clearing address %llx\n", m_warp_id, addr);
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			if (m_imiss_valid[i] == true){
+				if (m_imiss_adresses[i] == addr){
+					m_imiss_valid[i] = false;
+					return;
+				}
+			}
+		}
+		
+		//again, we can only clear entries if they existed
+		//if we ever reach here, there's an issue
+		printf("GPGPU-Sim Shader: Could not clear instruction miss entry\n");
+		abort();
+	}
 
     bool stores_done() const { return m_stores_outstanding == 0; }
     void inc_store_req() { m_stores_outstanding++; }
@@ -259,8 +323,11 @@ private:
     unsigned n_completed;          // number of threads in warp completed
     std::bitset<MAX_WARP_SIZE> m_active_threads;
 
-    bool m_imiss_pending;
-    
+    //bool m_imiss_pending;
+	//modify m_imiss_pending to be able to keep track of pending requests for multiple fragments
+	address_type m_imiss_adresses[MAX_WARP_FRAGMENTS];
+	bool m_imiss_valid[MAX_WARP_FRAGMENTS];
+		
     struct ibuffer_entry {
        ibuffer_entry() { m_valid = false; m_inst = NULL; }
        const warp_inst_t *m_inst;
@@ -1602,6 +1669,9 @@ public:
                      const struct memory_config *mem_config,
                      shader_core_stats *stats );
 
+//NEW, used for checking whether a warp is exiting
+    bool check_done_exit(unsigned warp_id);					 
+					 
 // used by simt_core_cluster:
     // modifiers
     void cycle();
@@ -1788,7 +1858,7 @@ private:
     friend class scheduler_unit; //this is needed to use private issue warp.
     friend class TwoLevelScheduler;
     friend class LooseRoundRobbinScheduler;
-    void issue_warp( register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id );
+    void issue_warp( unsigned depth, register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id );
     void func_exec_inst( warp_inst_t &inst );
 
      // Returns numbers of addresses in translated_addrs

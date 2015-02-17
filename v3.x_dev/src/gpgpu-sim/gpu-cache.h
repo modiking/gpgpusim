@@ -38,7 +38,7 @@
 #include "addrdec.h"
 
 //NEW: banked cache print debug flat
-#define BANKED_DEBUG 1
+#define BANKED_DEBUG 0
 
 enum cache_block_state {
     INVALID,

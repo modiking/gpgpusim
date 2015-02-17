@@ -295,7 +295,7 @@ public:
 
     //NEW functions
     bool     iter_get_pdom_stack(unsigned depth, unsigned *pc, unsigned *rpc ) const;
-    const simt_mask_t &iter_get_active_mask(unsigned depth) const;
+    simt_mask_t &iter_get_active_mask(unsigned depth);
 
     //NEW structure to store fragments
     struct fragment_entry {

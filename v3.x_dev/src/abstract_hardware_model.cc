@@ -40,6 +40,7 @@
 //NEW STUFF, name for print file to contain memory accesses
 #define MEM_PRINT_FILE "memory_access_info"
 #define PRINT_MEM_INFO 0
+#define FRAGMENT_PRINT 0
 
 //NEW STUFF, work-around way to make sure a new file is created every time to track memory accesses
 unsigned mem_file_created = 0;
@@ -676,11 +677,9 @@ void simt_stack::get_pdom_stack_top_info(unsigned *pc, unsigned *rpc ) const
 }
 
 //NEW function, go through stack, to get the active mask
-const simt_mask_t &simt_stack::iter_get_active_mask(unsigned depth) const
+simt_mask_t &simt_stack::iter_get_active_mask(unsigned depth)
 {
-  if (depth >= m_stack.size())
-    return false;
-
+  assert(depth < m_stack.size());
   assert(m_stack.size() > 0);
   return m_stack.at(m_stack.size()-depth-1).m_active_mask;
 }
@@ -706,47 +705,90 @@ bool simt_stack::iter_get_pdom_stack(unsigned depth, unsigned *pc, unsigned *rpc
 //NEW function, iterate through stack and find fragments
 std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 {
+	//printf("start of get fragments\n");
     std::deque<simt_mask_t> fragment_mask;
     fragment_entry new_fragment_entry;
-
+	//0 if previous op was not TYPE_CALL, 1 if it was
+	int prev_op = 0;
+	
     m_fragment_entries.clear();
 
     //if there is only 1 entry, it automatically is a fragment
+	
+	//we should always have at least 1 entry
+	//assert(m_stack.size() > 0);
 
-    //iterate from top of the stack down to bottom
+    //iterate from top of the stack to bottom
     for (int i = m_stack.size()-1; i >= 0; i--)
     {
+	  //To copy all valid entries to a new stack with same ordering, we push to the FRONT
+	  //so when we pop from the back we get the highest entry
+		
+	  
       //if the stack doesn't have a divergence tagged, we add it as executable
       //a 0 means its not a diverged branch
       if (m_stack.at(i).m_branch_div_cycle == 0)
       {
         new_fragment_entry.pc = m_stack.at(i).m_pc;
         new_fragment_entry.depth = m_stack.size()-i-1;
-        m_fragment_entries.push_back(new_fragment_entry);
-        fragment_mask.push_back(m_stack.at(i).m_active_mask);
+        m_fragment_entries.push_front(new_fragment_entry);
+        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+		prev_op = 0;
       }
+	  //NOTE: the stack is also used for function call? operations
+	  //the function call has a tagged divergence PC
+	  //we only want the highest call entry to be executable, so we ignore any more
+	  //until we hit a non-call entry
+	  else if (m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL && prev_op != 1){
+		new_fragment_entry.pc = m_stack.at(i).m_pc;
+        new_fragment_entry.depth = m_stack.size()-i-1;
+        m_fragment_entries.push_front(new_fragment_entry);
+        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+		prev_op = 1;
+	  }
+	  //in the special case that the only instruction is "exit", we can detect it by checking if the
+	  //reconvergence pc = (unsigned)-1, if it is then it should be added as an executable fragment
+	  //note we only treat it as executable if it sits on the top of the stack
+	  //this covers the case where "exit" is considered PDOM of divergent instructions
+	  else if ((m_stack.at(i).m_recvg_pc == (unsigned)-1) && (i == m_stack.size()-1)){
+		printf("Warp %u about to exit\n", m_warp_id);
+		new_fragment_entry.pc = m_stack.at(i).m_pc;
+        new_fragment_entry.depth = m_stack.size()-i-1;
+        m_fragment_entries.push_front(new_fragment_entry);
+        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+		prev_op = 0;
+	  }
+	  
     }
+	
+	
 
     //TEST code: print out fragments if there are more than 2
     //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
-    /*
-    if (m_fragment_entries.size() > 1){
-      printf("Test Code\n");
-      printf("SIMT stack state:\n");
-      //print to stdout
-      simt_stack::print(stdout);
-      for (int j = m_fragment_entries.size() - 1; j >= 0 ; j--){
-        printf("Depth (%d): PC = %s\n", m_fragment_entries.at(j).depth, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
-        printf("Mask: ");
-        for (unsigned i=0; i<m_warp_size; i++)
-            printf("%c", (fragment_mask.at(j).test(i)?'1':'0') );
-        printf("\n");
-      }
-    }*/
+    if (FRAGMENT_PRINT){
+		if (m_fragment_entries.size() > 1){
+		  printf("Test Code\n");
+		  printf("SIMT stack state:\n");
+		  //print to stdout
+		  simt_stack::print(stdout);
+		  for (signed j = m_fragment_entries.size() - 1; j >= 0 ; j--){
+			printf("Depth (%d): PC = %s\n", m_fragment_entries.at(j).depth, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
+			printf("Mask: ");
+			for (unsigned i=0; i<m_warp_size; i++)
+				printf("%c", (fragment_mask.at(j).test(i)?'1':'0') );
+			printf("\n");
+		  }
 
+		}
+	}
+	
+	//we should always have at least 1 entry
+	//assert(m_fragment_entries.size() > 0);
+	
+	
     simt_mask_t composite_mask = 0;
     //sanity check on fragments to make sure they're disjoint
-    for (int j = 0; j < fragment_mask.size(); j++){
+    for (unsigned j = 0; j < fragment_mask.size(); j++){
       //if a 1 bit shows up (collision in mask)
       //want negative assertion because any() returns a 0 when the vector is 0, which is
       //the correct behavior
@@ -754,6 +796,8 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
       composite_mask |= fragment_mask.at(j);
     }
 
+	//printf("end of get fragments\n");
+	
     return m_fragment_entries;
 }
 unsigned simt_stack::get_rp() const 
@@ -792,37 +836,52 @@ void simt_stack::print (FILE *fout) const
 void simt_stack::remove_to_depth(unsigned depth){
 	//depth starts at 0 up to m_stack.size() - 1
 	assert (depth < m_stack.size());
-	
+
 	m_temp_stack.clear();
 	
 	//pop from back of main stack, push to back
-	for (int i = 0; i < depth; i++){
+	for (unsigned i = 0; i < depth; i++){
 		m_temp_stack.push_back(m_stack.back());
 		m_stack.pop_back();
 	}
+	
+	//printf("Removed %u entries, depth = %u\n", m_temp_stack.size(), depth);
 }
 
 void simt_stack::add_back_top(){
+	//printf("Adding back %u entries\n", m_temp_stack.size());
 	
 	//to re-integrate, pop back from temp into main stack
-	for (int i = 0; i < m_temp_stack.size(); i++){
+	for (unsigned i = 0; i < m_temp_stack.size(); i++){
 		m_stack.push_back(m_temp_stack.back());
 		m_temp_stack.pop_back();
 	}
 	
 	//make sure we got every member
 	assert(m_temp_stack.size() == 0);
+	
+	//make sure stack has at least 1 member
+	//assert(m_stack.size() > 0);
+	
+	//actually, it is possible to have 0 entries, which corresponds to an exit
 }
 
 void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId)
 {
+	
+	//printf( "simt_stack::update_depth\n" );
     assert(m_stack.size() > 0);
 
     assert( next_pc.size() == m_warp_size );
 	
+	//printf("Before remove depth\n");
+	//simt_stack::print(stdout);
 	//easiest way to update specific entries is to pop the stack back to the entry
 	//manipulate it as if it was the top, then re-add the entries back
 	remove_to_depth(depth);
+	
+	//printf("After remove depth\n");
+	//simt_stack::print(stdout);
 
 	//proceed along normally
     simt_mask_t  top_active_mask = m_stack.back().m_active_mask;
@@ -962,6 +1021,9 @@ void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_ve
     if (warp_diverged) {
         ptx_file_line_stats_add_warp_divergence(top_pc, 1); 
     }
+	
+	//printf("Before add_back_top\n");
+	//simt_stack::print(stdout);
 	
 	//before every return, return stack to the way it was
 	add_back_top();
