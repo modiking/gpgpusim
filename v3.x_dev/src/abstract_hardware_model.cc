@@ -40,7 +40,7 @@
 //NEW STUFF, name for print file to contain memory accesses
 #define MEM_PRINT_FILE "memory_access_info"
 #define PRINT_MEM_INFO 0
-#define FRAGMENT_PRINT 0
+#define FRAGMENT_PRINT 1
 
 //NEW STUFF, work-around way to make sure a new file is created every time to track memory accesses
 unsigned mem_file_created = 0;
@@ -677,27 +677,27 @@ void simt_stack::get_pdom_stack_top_info(unsigned *pc, unsigned *rpc ) const
 }
 
 //NEW function, go through stack, to get the active mask
-simt_mask_t &simt_stack::iter_get_active_mask(unsigned depth)
+simt_mask_t &simt_stack::iter_get_active_mask(unsigned height)
 {
-  assert(depth < m_stack.size());
+  assert(height < m_stack.size());
   assert(m_stack.size() > 0);
-  return m_stack.at(m_stack.size()-depth-1).m_active_mask;
+  return m_stack.at(height).m_active_mask;
 }
 
 //NEW function, go through the stack, if we hit size 1 returns FALSE
-bool simt_stack::iter_get_pdom_stack(unsigned depth, unsigned *pc, unsigned *rpc ) const
+bool simt_stack::iter_get_pdom_stack(unsigned height, unsigned *pc, unsigned *rpc ) const
 {
 
   //printf("m_stack size = %d\n", m_stack.size());
   //printf("bool eval = %d\n", depth >= m_stack.size());
   //printf("m_stack.size()-depth-1 = %d\n", m_stack.size()-depth-1);
   //check to make sure the entry exists
-  if (depth >= m_stack.size())
+  if (height >= m_stack.size())
     return false;
 
   assert(m_stack.size() > 0);
-  *pc = m_stack.at(m_stack.size()-depth-1).m_pc;
-  *rpc = m_stack.at(m_stack.size()-depth-1).m_recvg_pc;
+  *pc = m_stack.at(height).m_pc;
+  *rpc = m_stack.at(height).m_recvg_pc;
 
   return true;
 }
@@ -721,48 +721,55 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
     //iterate from top of the stack to bottom
     for (int i = m_stack.size()-1; i >= 0; i--)
     {
-	  //To copy all valid entries to a new stack with same ordering, we push to the FRONT
-	  //so when we pop from the back we get the highest entry
-		
+	  //if the entry is currently in execution, we ignore it
+	  if (m_stack.at(i).m_in_execution)
+		  continue;
 	  
       //if the stack doesn't have a divergence tagged, we add it as executable
       //a 0 means its not a diverged branch
       if (m_stack.at(i).m_branch_div_cycle == 0)
       {
         new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.depth = m_stack.size()-i-1;
-        m_fragment_entries.push_front(new_fragment_entry);
-        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+        new_fragment_entry.height = i;
+        m_fragment_entries.push_back(new_fragment_entry);
+        fragment_mask.push_back(m_stack.at(i).m_active_mask);
 		prev_op = 0;
+		
+		//update entry on stack to show its currently in execution
+		m_stack.at(i).m_in_execution = true;
       }
 	  //NOTE: the stack is also used for function call? operations
 	  //the function call has a tagged divergence PC
 	  //we only want the highest call entry to be executable, so we ignore any more
 	  //until we hit a non-call entry
-	  else if (m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL && prev_op != 1){
+	  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
 		new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.depth = m_stack.size()-i-1;
-        m_fragment_entries.push_front(new_fragment_entry);
-        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+        new_fragment_entry.height = i;
+        m_fragment_entries.push_back(new_fragment_entry);
+        fragment_mask.push_back(m_stack.at(i).m_active_mask);
 		prev_op = 1;
+		
+		//update entry on stack to show its currently in execution
+		m_stack.at(i).m_in_execution = true;
 	  }
 	  //in the special case that the only instruction is "exit", we can detect it by checking if the
 	  //reconvergence pc = (unsigned)-1, if it is then it should be added as an executable fragment
 	  //note we only treat it as executable if it sits on the top of the stack
 	  //this covers the case where "exit" is considered PDOM of divergent instructions
 	  else if ((m_stack.at(i).m_recvg_pc == (unsigned)-1) && (i == m_stack.size()-1)){
-		printf("Warp %u about to exit\n", m_warp_id);
+		//printf("Warp %u about to exit\n", m_warp_id);
 		new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.depth = m_stack.size()-i-1;
-        m_fragment_entries.push_front(new_fragment_entry);
-        fragment_mask.push_front(m_stack.at(i).m_active_mask);
+        new_fragment_entry.height = i;
+        m_fragment_entries.push_back(new_fragment_entry);
+        fragment_mask.push_back(m_stack.at(i).m_active_mask);
 		prev_op = 0;
+		
+		//update entry on stack to show its currently in execution
+		m_stack.at(i).m_in_execution = true;
 	  }
 	  
     }
 	
-	
-
     //TEST code: print out fragments if there are more than 2
     //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
     if (FRAGMENT_PRINT){
@@ -772,7 +779,7 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 		  //print to stdout
 		  simt_stack::print(stdout);
 		  for (signed j = m_fragment_entries.size() - 1; j >= 0 ; j--){
-			printf("Depth (%d): PC = %s\n", m_fragment_entries.at(j).depth, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
+			printf("Height (%d): PC = %s\n", m_fragment_entries.at(j).height, ptx_get_insn_str(m_fragment_entries.at(j).pc).c_str());
 			printf("Mask: ");
 			for (unsigned i=0; i<m_warp_size; i++)
 				printf("%c", (fragment_mask.at(j).test(i)?'1':'0') );
@@ -781,10 +788,6 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 
 		}
 	}
-	
-	//we should always have at least 1 entry
-	//assert(m_fragment_entries.size() > 0);
-	
 	
     simt_mask_t composite_mask = 0;
     //sanity check on fragments to make sure they're disjoint
@@ -833,19 +836,19 @@ void simt_stack::print (FILE *fout) const
     }
 }
 
-void simt_stack::remove_to_depth(unsigned depth){
-	//depth starts at 0 up to m_stack.size() - 1
-	assert (depth < m_stack.size());
+void simt_stack::remove_to_height(unsigned height){
+	//height starts at 0 (bottom of stack) up to stack size, should always be less than or equal to
+	assert (height <= m_stack.size());
 
 	m_temp_stack.clear();
 	
 	//pop from back of main stack, push to back
-	for (unsigned i = 0; i < depth; i++){
+	for (unsigned i = 0; i < m_stack.size() - (height + 1); i++){
 		m_temp_stack.push_back(m_stack.back());
 		m_stack.pop_back();
 	}
 	
-	//printf("Removed %u entries, depth = %u\n", m_temp_stack.size(), depth);
+	//printf("Removed %u entries, height = %u\n", m_temp_stack.size(), height);
 }
 
 void simt_stack::add_back_top(){
@@ -866,21 +869,23 @@ void simt_stack::add_back_top(){
 	//actually, it is possible to have 0 entries, which corresponds to an exit
 }
 
-void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId)
+void simt_stack::update_height( unsigned height, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId, signed * height_removed)
 {
 	
-	//printf( "simt_stack::update_depth\n" );
+	//printf( "simt_stack::update_height\n" );
     assert(m_stack.size() > 0);
 
     assert( next_pc.size() == m_warp_size );
 	
-	//printf("Before remove depth\n");
+	//printf("Before remove height\n");
 	//simt_stack::print(stdout);
 	//easiest way to update specific entries is to pop the stack back to the entry
 	//manipulate it as if it was the top, then re-add the entries back
-	remove_to_depth(depth);
+	remove_to_height(height);
 	
-	//printf("After remove depth\n");
+	unsigned initial_height = m_stack.size();
+	
+	//printf("After remove height\n");
 	//simt_stack::print(stdout);
 
 	//proceed along normally
@@ -888,6 +893,10 @@ void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_ve
     address_type top_recvg_pc = m_stack.back().m_recvg_pc;
     address_type top_pc = m_stack.back().m_pc; // the pc of the instruction just executed
     stack_entry_type top_type = m_stack.back().m_type;
+	
+	//update entry on stack to show its currently in execution
+	//by default if we get to this point, the entry is now fair game to be executed again
+	//m_stack.back().m_in_execution = false;
 
     //new code
     int old_stack_size = m_stack.size();
@@ -935,15 +944,19 @@ void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_ve
             new_stack_entry.m_type = STACK_ENTRY_TYPE_CALL;
             m_stack.push_back(new_stack_entry);
 			
+			//reset m_in_execution
+			//m_stack.back().m_in_execution = false;
+			//track removals
+			*height_removed = initial_height - m_stack.size();
 			//before every return, return stack to the way it was
-			add_back_top();
+			add_back_top();	
             return;
 
         } else if(next_inst_op == RET_OPS && top_type==STACK_ENTRY_TYPE_CALL) {
             // pop the CALL Entry
             assert(top_active_mask.any() == false);
             m_stack.pop_back();
-
+			
             assert(m_stack.size() > 0);
             m_stack.back().m_pc=tmp_next_pc;// set the PC of the stack top entry to return PC from  the call stack;
             // Check if the New top of the stack is reconverging
@@ -953,6 +966,10 @@ void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_ve
                 m_stack.pop_back();
             }
 			
+			//reset m_in_execution
+			//m_stack.back().m_in_execution = false;
+			//track removals
+			*height_removed = initial_height - m_stack.size();			
 			//before every return, return stack to the way it was
 			add_back_top();
             return;
@@ -1025,6 +1042,9 @@ void simt_stack::update_depth( unsigned depth, simt_mask_t &thread_done, addr_ve
 	//printf("Before add_back_top\n");
 	//simt_stack::print(stdout);
 	
+	//m_in_execution was reset at beginning
+	//track removals
+	*height_removed = initial_height - m_stack.size();	
 	//before every return, return stack to the way it was
 	add_back_top();
 	return;
@@ -1208,7 +1228,7 @@ void core_t::updateSIMTStack(unsigned warpId, warp_inst_t * inst)
     m_simt_stack[warpId]->update(thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId);
 }
 
-void core_t::updateSIMTStack_depth(unsigned depth, unsigned warpId, warp_inst_t * inst)
+void core_t::updateSIMTStack_height(unsigned height, unsigned warpId, warp_inst_t * inst, signed * height_removed)
 {
 	simt_mask_t thread_done;
     addr_vector_t next_pc;
@@ -1220,12 +1240,14 @@ void core_t::updateSIMTStack_depth(unsigned depth, unsigned warpId, warp_inst_t 
         } else {
             if( inst->reconvergence_pc == RECONVERGE_RETURN_PC ) 
                 inst->reconvergence_pc = get_return_pc(m_thread[wtid+i]);
+			//update from the outside the stack, but that value is always maintained
+			//in sync with stack
             next_pc.push_back( m_thread[wtid+i]->get_pc() );
         }
     }
 	
 	//utilize the new one instead
-	m_simt_stack[warpId]->update_depth(depth, thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId);
+	m_simt_stack[warpId]->update_height(height, thread_done,next_pc,inst->reconvergence_pc, inst->op, warpId, height_removed);
 }
 
 //! Get the warp to be executed using the data taken form the SIMT stack

@@ -1158,8 +1158,10 @@ void ptx_thread_info::ptx_exec_inst( warp_inst_t &inst, unsigned lane_id)
     
    bool skip = false;
    int op_classification = 0;
-   addr_t pc = next_instr();
-   assert( pc == inst.pc ); // make sure timing model and functional model are in sync
+   //this pc can jump all over the place, so does hard setting it work?
+   //addr_t pc = next_instr();
+   //assert( pc == inst.pc ); // make sure timing model and functional model are in sync
+   addr_t pc = inst.pc;
    const ptx_instruction *pI = m_func_info->get_instruction(pc);
    set_npc( pc + pI->inst_size() );
    

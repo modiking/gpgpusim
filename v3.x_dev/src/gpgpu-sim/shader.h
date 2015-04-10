@@ -74,7 +74,7 @@
 #define MAX_CTA_PER_SHADER 32
 
 //NEW, max concurrent warp fragments per warp
-#define MAX_WARP_FRAGMENTS 4
+#define MAX_WARP_FRAGMENTS 1
 
 //NEW, pulled definition from inside of the warp_t object
 #define IBUFFER_SIZE 2
@@ -109,6 +109,7 @@ public:
 		
         for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
 			m_imiss_valid[i] = false;
+			m_next[i]=0;
 		}
 		
         m_warp_id=(unsigned)-1;
@@ -118,7 +119,7 @@ public:
         m_membar=false;
         m_done_exit=true;
         m_last_fetch=0;
-        m_next=0;
+        
     }
     void init( address_type start_pc,
                unsigned cta_id,
@@ -136,6 +137,10 @@ public:
         m_active_threads = active;
         m_done_exit=false;
         m_frag_num=0;
+		
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			m_next[i]=0;
+		}
     }
 
     bool functional_done() const;
@@ -166,6 +171,9 @@ public:
     void clear_membar() { m_membar=false; }
     bool get_membar() const { return m_membar; }
     address_type get_pc() const { return m_next_pc; }
+	//NOTE: this is replicated in the stack itself, and the stack is the ultimate source
+	//for the correct next pc. This is left in place to maintain the old scheme of passing
+	//address. Can be removed when the scheme changes
     void set_next_pc( address_type pc ) { m_next_pc = pc; }
 
 
@@ -206,35 +214,50 @@ public:
        assert(slot < IBUFFER_SIZE );
        m_ibuffer[m_frag_num][slot].m_inst=pI;
        m_ibuffer[m_frag_num][slot].m_valid=true;
-       m_next=0; //we always fill entry 0, decode auto-shifts to slot 0 if we don't do double execution
+       m_next[m_frag_num]=0; //we always fill entry 0, decode auto-shifts to slot 0 if we don't do double execution
     }
     bool ibuffer_empty() const
     {
-        for( unsigned i=0; i < IBUFFER_SIZE; i++) 
-            if(m_ibuffer[m_frag_num][i].m_valid) 
+        for( unsigned i=0; i < IBUFFER_SIZE; i++){ 
+            if(m_ibuffer[m_frag_num][i].m_valid){
                 return false;
+			}
+		}
         return true;
     }
     void ibuffer_flush()
     {
         for(unsigned i=0;i<IBUFFER_SIZE;i++) {
-            if( m_ibuffer[m_frag_num][i].m_valid )
+            if( m_ibuffer[m_frag_num][i].m_valid ){
                 dec_inst_in_pipeline();
+			}
             m_ibuffer[m_frag_num][i].m_inst=NULL; 
             m_ibuffer[m_frag_num][i].m_valid=false; 
         }
     }
-    const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_frag_num][m_next].m_inst; }
-    bool ibuffer_next_valid() { return m_ibuffer[m_frag_num][m_next].m_valid; }
+    const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_inst; }
+    bool ibuffer_next_valid() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_valid; }
     //requires new entry frag_num
     void ibuffer_free()
     {
-        m_ibuffer[m_frag_num][m_next].m_inst = NULL;
-        m_ibuffer[m_frag_num][m_next].m_valid = false;
+        m_ibuffer[m_frag_num][m_next[m_frag_num]].m_inst = NULL;
+        m_ibuffer[m_frag_num][m_next[m_frag_num]].m_valid = false;
     }
 	
 	//called on do_on_warp_issued to step to next entry
-    void ibuffer_step() { m_next = (m_next+1)%IBUFFER_SIZE; }
+    void ibuffer_step() { m_next[m_frag_num] = (m_next[m_frag_num]+1)%IBUFFER_SIZE; }
+	
+	//new function: ibuffer now stores height information, this is the function for it
+	void ibuffer_store_height(unsigned height) 
+	{
+		for(unsigned i=0;i<IBUFFER_SIZE;i++) {
+			m_ibuffer[m_frag_num][i].m_height = height;
+		}
+	}
+	
+	unsigned ibuffer_get_height(){
+		return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_height;
+	}
 
 	//NEW, have to go through the entire array and see if there are any valid entries
     bool imiss_pending() 
@@ -329,9 +352,10 @@ private:
 	bool m_imiss_valid[MAX_WARP_FRAGMENTS];
 		
     struct ibuffer_entry {
-       ibuffer_entry() { m_valid = false; m_inst = NULL; }
+       ibuffer_entry() { m_valid = false; m_inst = NULL; m_height = 0;}
        const warp_inst_t *m_inst;
        bool m_valid;
+	   unsigned m_height;
     };
 
     //NEW, internal variable to store fragment number
@@ -339,7 +363,7 @@ private:
 
     //NEW, 2D array to store fragment information
     ibuffer_entry m_ibuffer[MAX_WARP_FRAGMENTS][IBUFFER_SIZE]; 
-    unsigned m_next;
+    unsigned m_next[MAX_WARP_FRAGMENTS];
                                    
     unsigned m_n_atomic;           // number of outstanding atomic operations 
     bool     m_membar;             // if true, warp is waiting at memory barrier
@@ -1026,18 +1050,20 @@ struct insn_latency_info {
 struct ifetch_buffer_t {
     ifetch_buffer_t() { m_valid=false; }
 
-    ifetch_buffer_t( address_type pc, unsigned nbytes, unsigned warp_id ) 
+    ifetch_buffer_t( address_type pc, unsigned nbytes, unsigned warp_id, unsigned fragment_num) 
     { 
         m_valid=true; 
         m_pc=pc; 
         m_nbytes=nbytes; 
         m_warp_id=warp_id;
+		m_fragment_num = fragment_num;
     }
 
     bool m_valid;
     address_type m_pc;
     unsigned m_nbytes;
     unsigned m_warp_id;
+	unsigned m_fragment_num; //NEW: fragment location in ibuffer to store info 
 };
 
 class shader_core_config;
@@ -1698,6 +1724,53 @@ public:
     kernel_info_t *get_kernel() { return m_kernel; }
     unsigned get_sid() const {return m_sid;}
 
+	//NEW: access to the fragment entries
+	//void get_fragments_per_warp(std::vector<std::deque<simt_stack::fragment_entry>> *fragment_entries) const {fragment_entries = &m_fragment_entries;}
+	bool inst_buffer_full(){
+		for (unsigned i = 0; i < m_inst_fetch_buffers.size(); i++){
+			if (!m_inst_fetch_buffers[i].m_valid){
+				return false;
+			}
+		}
+		return true;
+	}
+	
+	bool inst_buffer_empty(){
+		for (unsigned i = 0; i < m_inst_fetch_buffers.size(); i++){
+			if (m_inst_fetch_buffers[i].m_valid){
+				return false;
+			}
+		}
+		return true;
+	}
+	
+	void add_to_inst_buffer(ifetch_buffer_t inst_entry){
+		//make sure we're not full, should've been checked before calling this
+		assert(!inst_buffer_full());
+		
+		//add to first free entry
+		for (unsigned i = 0; i < m_inst_fetch_buffers.size(); i++){
+			if (!m_inst_fetch_buffers[i].m_valid){
+				m_inst_fetch_buffers[i] = inst_entry;
+				return;
+			}
+		}	
+	}
+	
+	unsigned get_inst_from_buffer(){
+		//makes sure we have an entry, should've been checked before calling this
+		assert(!inst_buffer_empty());
+		
+		//get entry
+		for (unsigned i = 0; i < m_inst_fetch_buffers.size(); i++){
+			if (m_inst_fetch_buffers[i].m_valid){
+				return i;
+			}
+		}
+		
+		return -1;
+	}
+	
 // used by functional simulation:
     // modifiers
     virtual void warp_exit( unsigned warp_id );
@@ -1850,6 +1923,9 @@ private:
     virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid);
     address_type next_pc( int tid ) const;
     void fetch();
+	//NEW
+	void fill_inst_buffer(unsigned warp_id);
+	
     void register_cta_thread_exit( unsigned cta_num );
 
     void decode();
@@ -1860,6 +1936,9 @@ private:
     friend class LooseRoundRobbinScheduler;
     void issue_warp( unsigned depth, register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id );
     void func_exec_inst( warp_inst_t &inst );
+	
+	//fix for book-keeping after issue
+	void fix_heights(unsigned height, signed height_removed, unsigned warp_id);
 
      // Returns numbers of addresses in translated_addrs
     unsigned translate_local_memaddr( address_type localaddr, unsigned tid, unsigned num_shader, unsigned datasize, new_addr_type* translated_addrs );
@@ -1869,6 +1948,22 @@ private:
     void execute();
     
     void writeback();
+	//NEW: struct and deque used to store warp_id, PC, and height information
+	struct in_flight_warp{
+		in_flight_warp(){}
+		
+		in_flight_warp(unsigned warp_id, unsigned long long cycle_issued, unsigned height){
+			m_warp_id = warp_id;
+			m_cycle_issued = cycle_issued;
+			m_height = height;
+		}
+		
+		unsigned m_warp_id;
+		unsigned long long m_cycle_issued;
+		unsigned m_height;
+	};
+
+	std::deque<in_flight_warp> m_in_flight_warp_info;
     
     // used in display_pipeline():
     void dump_warp_state( FILE *fout ) const;
@@ -1903,11 +1998,15 @@ private:
 	//NEW: used banked cache for instructions
     banked_read_only_cache *m_L1I; // instruction cache
     int  m_last_warp_fetched;
+	//NEW: vector of deques to hold the executable fragments
+	std::vector<std::deque<simt_stack::fragment_entry>> m_fragment_entries;
 
     // decode/dispatch
     std::vector<shd_warp_t>   m_warp;   // per warp information array
     barrier_set_t             m_barriers;
-    ifetch_buffer_t           m_inst_fetch_buffer;
+    //ifetch_buffer_t           m_inst_fetch_buffer;
+	//new, we now have up to MAX_WARP_FRAGMENTS number of instruction buffers
+	std::vector<ifetch_buffer_t> m_inst_fetch_buffers;
     std::vector<register_set> m_pipeline_reg;
     Scoreboard               *m_scoreboard;
     opndcoll_rfu_t            m_operand_collector;

@@ -149,7 +149,7 @@ public:
                           &mshr_type, &m_mshr_entries,&m_mshr_max_merge,
                           &m_miss_queue_size,&m_result_fifo_entries,
                           &m_data_port_width);
-
+			  
         if ( ntok < 12 ) {
             if ( !strcmp(config,"none") ) {
                 m_disabled = true;
