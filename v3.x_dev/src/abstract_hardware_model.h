@@ -304,7 +304,7 @@ public:
 			m_stack.at(height).m_in_execution = false;
 	}
 
-	void set_next_pc(int height, unsigned pc) { m_stack.at(height).m_pc = pc;}
+	//void set_next_pc(int height, unsigned pc) { m_stack.at(height).m_pc = pc;}
     //NEW structure to store fragments
     struct fragment_entry {
         address_type pc;

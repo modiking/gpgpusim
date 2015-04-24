@@ -40,7 +40,7 @@
 //NEW STUFF, name for print file to contain memory accesses
 #define MEM_PRINT_FILE "memory_access_info"
 #define PRINT_MEM_INFO 0
-#define FRAGMENT_PRINT 1
+#define FRAGMENT_PRINT 0
 
 //NEW STUFF, work-around way to make sure a new file is created every time to track memory accesses
 unsigned mem_file_created = 0;
@@ -721,43 +721,20 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
     //iterate from top of the stack to bottom
     for (int i = m_stack.size()-1; i >= 0; i--)
     {
+		
 	  //if the entry is currently in execution, we ignore it
 	  if (m_stack.at(i).m_in_execution)
-		  continue;
-	  
-      //if the stack doesn't have a divergence tagged, we add it as executable
-      //a 0 means its not a diverged branch
-      if (m_stack.at(i).m_branch_div_cycle == 0)
-      {
-        new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.height = i;
-        m_fragment_entries.push_back(new_fragment_entry);
-        fragment_mask.push_back(m_stack.at(i).m_active_mask);
-		prev_op = 0;
+	    continue;	
 		
-		//update entry on stack to show its currently in execution
-		m_stack.at(i).m_in_execution = true;
-      }
-	  //NOTE: the stack is also used for function call? operations
-	  //the function call has a tagged divergence PC
-	  //we only want the highest call entry to be executable, so we ignore any more
-	  //until we hit a non-call entry
-	  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
-		new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.height = i;
-        m_fragment_entries.push_back(new_fragment_entry);
-        fragment_mask.push_back(m_stack.at(i).m_active_mask);
-		prev_op = 1;
-		
-		//update entry on stack to show its currently in execution
-		m_stack.at(i).m_in_execution = true;
-	  }
 	  //in the special case that the only instruction is "exit", we can detect it by checking if the
 	  //reconvergence pc = (unsigned)-1, if it is then it should be added as an executable fragment
 	  //note we only treat it as executable if it sits on the top of the stack
 	  //this covers the case where "exit" is considered PDOM of divergent instructions
-	  else if ((m_stack.at(i).m_recvg_pc == (unsigned)-1) && (i == m_stack.size()-1)){
+	  if ((m_stack.at(i).m_recvg_pc == (unsigned)-1) && (i == m_stack.size()-1) && (m_stack.at(i).m_branch_div_cycle != 0)){
 		//printf("Warp %u about to exit\n", m_warp_id);
+		//assert(m_stack.at(i).m_in_execution == false);
+		//if there is an exist it will be pdom for everyone
+		assert(m_stack.size() == 1);
 		new_fragment_entry.pc = m_stack.at(i).m_pc;
         new_fragment_entry.height = i;
         m_fragment_entries.push_back(new_fragment_entry);
@@ -766,6 +743,38 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 		
 		//update entry on stack to show its currently in execution
 		m_stack.at(i).m_in_execution = true;
+	  }
+	  else{
+		  
+		  
+		  
+		  //if the stack doesn't have a divergence tagged, we add it as executable
+		  //a 0 means its not a diverged branch
+		  if (m_stack.at(i).m_branch_div_cycle == 0)
+		  {
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			fragment_mask.push_back(m_stack.at(i).m_active_mask);
+			prev_op = 0;
+			
+			//update entry on stack to show its currently in execution
+			m_stack.at(i).m_in_execution = true;
+		  }
+		  //NOTE: the stack is also used for function call? operations
+		  //the function call has a tagged divergence PC
+		  //we only want the highest call entry to be executable, so we ignore any more
+		  //until we hit a non-call entry
+		  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			fragment_mask.push_back(m_stack.at(i).m_active_mask);
+			prev_op = 1;
+			
+			//update entry on stack to show its currently in execution
+			m_stack.at(i).m_in_execution = true;
+		  }
 	  }
 	  
     }
@@ -773,7 +782,7 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
     //TEST code: print out fragments if there are more than 2
     //const std::deque<simt_stack::fragment_entry> &fragment_entries = m_simt_stack[warp_id].get_fragments();
     if (FRAGMENT_PRINT){
-		if (m_fragment_entries.size() > 1){
+		if ((m_fragment_entries.size() > 1) || (m_stack.size() > 1)){
 		  printf("Test Code\n");
 		  printf("SIMT stack state:\n");
 		  //print to stdout
@@ -832,6 +841,11 @@ void simt_stack::print (FILE *fout) const
             fprintf(fout," " );
         }
         ptx_print_insn( stack_entry.m_pc, fout );
+		if (stack_entry.m_in_execution){
+			fprintf(fout, " E");
+		} else {
+			fprintf(fout, " NE");
+		}
         fprintf(fout,"\n");
     }
 }

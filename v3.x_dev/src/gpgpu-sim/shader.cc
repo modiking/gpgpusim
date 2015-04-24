@@ -597,10 +597,10 @@ void shader_core_ctx::decode()
 		}
 		
 		//TEMPORARY FIX, need to find real cause soon
-		if (!m_warp[m_inst_fetch_buffers[i].m_warp_id].ibuffer_empty()){
+		/*if (!m_warp[m_inst_fetch_buffers[i].m_warp_id].ibuffer_empty()){
 			m_inst_fetch_buffers[i].m_valid = false;
 			continue;
-		}
+		}*/
 		//should not have an existing entry in the ibuffer
 		assert(m_warp[m_inst_fetch_buffers[i].m_warp_id].ibuffer_empty());
 		
@@ -636,15 +636,25 @@ void shader_core_ctx::decode()
 
 void shader_core_ctx::fetch()
 {
+	//we store this here to be static as multiple fetches can update this value
+	//during the for loop
+	unsigned last_fetched_warp = m_last_warp_fetched;
+	
+	unsigned fetched = 0;
 
 	//printf( "shader_core_ctx::fetch()\n" );
 	// find an active warp with space in instruction buffer that is not already waiting on a cache miss
 	// and get next 1-2 instructions from i-cache...
 	for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
-		unsigned warp_id = (m_last_warp_fetched+1+i) % m_config->max_warps_per_shader;
+		unsigned warp_id = (last_fetched_warp+1+i) % m_config->max_warps_per_shader;
 
 		//break out if there's no room in fetch buffer
 		if(inst_buffer_full()){
+			break;
+		}
+		
+		//only have X number of fetch units total, so once we reach that we can't continue
+		if (fetched >= MAX_WARP_FRAGMENTS){
 			break;
 		}
 		
@@ -663,9 +673,16 @@ void shader_core_ctx::fetch()
 					did_exit=true;
 				}
 			}
-			if( did_exit ) 
+			if( did_exit ) {
 				m_warp[warp_id].set_done_exit();
+				//currently a band-aid, need to fix later
+				//m_warp[warp_id].ibuffer_full_flush();
+			}
 		}
+		
+		/*if((gpu_tot_sim_cycle+gpu_sim_cycle == 12727)){
+			printf("%Lu shader %u checking warp: %d i = %u max = \n", gpu_tot_sim_cycle+gpu_sim_cycle, m_sid ,warp_id, i, m_config->max_warps_per_shader);
+		}*/
 		
 		//because we allow multiple execution, it is possible for a warp to execute when 1 side
 		//of the branch gets on the stack, only for it to be eligible again when another warp comes on
@@ -687,6 +704,33 @@ void shader_core_ctx::fetch()
 			if (m_fragment_entries[warp_id].size() == 0){
 				m_fragment_entries[warp_id] = m_simt_stack[warp_id]->get_fragments();
 			}
+			/*else{
+				//if there are fragments, then we want to grab them anyways and merge results
+				//this means we always have the most up to date copy
+				//and prevents double execution from stale copies
+				std::deque<simt_stack::fragment_entry> temp_fragment_entries = m_simt_stack[warp_id]->get_fragments();
+				
+				//merge lists
+				for (std::deque<simt_stack::fragment_entry>::iterator it = temp_fragment_entries.begin(); 
+				it != temp_fragment_entries.end(); 
+				++it){
+					for (std::deque<simt_stack::fragment_entry>::iterator it2 = m_fragment_entries[warp_id].begin(); 
+					it2 != m_fragment_entries[warp_id].end(); 
+					++it2){
+						if (it2->height == it->height){
+							//update
+							it2->pc = it->pc;
+							it2->height = it->height;
+						}
+					}
+					
+					//otherwise, just add it at the end
+					m_fragment_entries[warp_id].push_back(*it);
+				}
+				
+				temp_fragment_entries.clear();
+				
+			}*/
 			
 			//break out if there's no more valid fragments
 			//if (m_fragment_entries[warp_id].size() == 0){
@@ -705,6 +749,16 @@ void shader_core_ctx::fetch()
 			//create iterator starting at end of fragment_entries (top of the stack)
 			std::deque<simt_stack::fragment_entry>::iterator highest_fragment = m_fragment_entries[warp_id].begin();
 			
+			/*address_type pc = highest_fragment->pc;
+			if((warp_id == 0) && (pc == 0x3a0) &&(gpu_tot_sim_cycle+gpu_sim_cycle == 12727)){
+				
+				printf("%Lu hello\n", gpu_tot_sim_cycle+gpu_sim_cycle);
+				printf("NEED MORE LINES APPARENTLY\n");
+				
+			}*/
+			
+			unsigned fragment_size = m_fragment_entries[warp_id].size();
+			
 			//go through the ibuffer
 			for (int j = 0; j < MAX_WARP_FRAGMENTS; j++){
 				
@@ -715,11 +769,6 @@ void shader_core_ctx::fetch()
 				else{
 					//otherwise step
 					m_warp[warp_id].ibuffer_next_frag();
-				}
-				
-				//move on if current buffer has an entry
-				if (!m_warp[warp_id].ibuffer_empty()){
-					continue;
 				}
 				
 				//break out if there's no more valid fragments
@@ -733,8 +782,33 @@ void shader_core_ctx::fetch()
 				}
 				
 				//also break out if there's no more fragments currently available
-				if (highest_fragment == m_fragment_entries[warp_id].end()){
+				if (fetched >= MAX_WARP_FRAGMENTS){
 					break;
+				}
+				
+				//break if we've fetched all fragments
+				if (fetched >= fragment_size){
+					break;
+				}
+				
+				//if current buffer has an entry, we want to check if it shares a height
+				if (!m_warp[warp_id].ibuffer_empty()){
+					//go through all entries, ending up back at the original
+					/*for (int k = 0; k < IBUFFER_SIZE; k++){
+						if (m_warp[warp_id].ibuffer_next_valid()){
+							if (m_fragment_entries[warp_id].size() > 0){
+								if (m_warp[warp_id].ibuffer_get_height() == highest_fragment->height){
+									//we can safely ignore this fragment, as it will be fetched again after the entire buffer empties
+									m_fragment_entries[warp_id].erase(highest_fragment);
+									++highest_fragment;
+									fetched++;
+								}
+							}
+						}
+						
+						m_warp[warp_id].ibuffer_step();
+					}*/
+					continue;
 				}
 				
 				//go through all fragments, either create new mem fetches or service
@@ -747,9 +821,22 @@ void shader_core_ctx::fetch()
 				//execute fragments from top of the stack (back of m_fragment_entries queue) first
 				address_type pc = highest_fragment->pc;
 				
+				//printf("warp_id: %d\n", warp_id);
+				
+				//assert(m_fragment_entries[warp_id].size() > 0);
+				
+				//assert(highest_fragment->height < 10);
+				
 				//update ibuffer with height information
 				m_warp[warp_id].ibuffer_store_height(highest_fragment->height);
 				
+				//printing
+				if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12400) && (warp_id == 19) && (m_sid == 11)){
+				printf( "Cycle %Lu: Fetching Warp (warp_id %u) instruction (%s) at stack height %u for ibuffer %d\n",
+							gpu_tot_sim_cycle+gpu_sim_cycle,
+							 warp_id,
+							 ptx_get_insn_str( pc).c_str(), highest_fragment->height, j );
+				}
 				
 				address_type ppc = pc + PROGRAM_MEM_START;
 				unsigned nbytes=16; 
@@ -797,6 +884,7 @@ void shader_core_ctx::fetch()
 				
 				//proceed to next fragment entry
 				++highest_fragment;
+				fetched++;
 
 			}
 			
@@ -964,7 +1052,7 @@ void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
 	}
 }
 
-void shader_core_ctx::issue_warp( unsigned height, register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id )
+void shader_core_ctx::issue_warp( unsigned height, register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id, unsigned& active_lane_count )
 {
     warp_inst_t** pipe_reg = pipe_reg_set.get_free();
     assert(pipe_reg);
@@ -973,7 +1061,9 @@ void shader_core_ctx::issue_warp( unsigned height, register_set& pipe_reg_set, c
     assert(next_inst->valid());
     **pipe_reg = *next_inst; // static instruction information
     (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id() ); // dynamic instruction information
-    m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
+    //stats moved into issue as we can issue to multiple pipe regs at a time
+	//m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
+	active_lane_count = (*pipe_reg)->active_count();
     func_exec_inst( **pipe_reg );
     if( next_inst->op == BARRIER_OP ) 
         m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id);
@@ -989,23 +1079,32 @@ void shader_core_ctx::issue_warp( unsigned height, register_set& pipe_reg_set, c
 	m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
 	
 	//add into queue to associate heights with the instructions
-	m_in_flight_warp_info.push_back(in_flight_warp(warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, height));
+	m_in_flight_warp_info.push_back(in_flight_warp(warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, height, m_warp[warp_id].ibuffer_empty()));
 	
-	//address now set to stack entry as well, which now always holds correct information	
 	//this case occurs on warp exit, in which case we don't need this book-keeping
 	if ((height_removed == 1) && (height == 0))
 	{
 		return;
 	}
 	
+	//if we hit divergence (height removed is negative), then the frame must be reset in 
+	//execution to allow it to be executed. It should naturally be skipped because it 
+	//contains a divergence PC until convergence has occured
+	if (height_removed < 0){
+		m_simt_stack[warp_id]->reset_in_execution(height);
+	}
+	
+	//The address should've have automatically been calculated in updateSIMTStack_height()
+	//then applied in update_height()
+	
 	//if we removed from stack (aka reconverged), update the PC at reconverge entry
-	if (height_removed > 0){
+	/*if (height_removed > 0){
 		m_simt_stack[warp_id]->set_next_pc(height-height_removed, next_inst->pc + next_inst->isize);
 	}
 	else
 	{
 		m_simt_stack[warp_id]->set_next_pc(height, next_inst->pc + next_inst->isize);
-	}
+	}*/
 	
 	//book-keeping
 	//height updates from the middle/bottom of the stack must propogate to all current heights
@@ -1201,6 +1300,9 @@ void scheduler_unit::cycle()
 		//reset internal fragment for every warp
 		warp(warp_id).ibuffer_reset_frag();
 		
+		//keep track of lanes used
+		unsigned lanes_active = 0;
+		
 		//Go through the whole buffer
 		//if there's nothing issued, we can test another buffer
 		while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < MAX_WARP_FRAGMENTS)) {
@@ -1233,11 +1335,16 @@ void scheduler_unit::cycle()
 							 ptx_get_insn_str( pc).c_str(), height );
 			}
 			
-			//sanity check that the instruction is valid
-			assert(valid_stack_entry && valid);
+			unsigned active_lane_count = 0;
 		  
 			//should still check if there's at least 1 instruction
 			if( pI ) {
+				//sanity check that the instruction is valid
+				assert(valid_stack_entry && valid);
+				
+				if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12488) && (warp_id == 19) && (m_shader->m_sid == 11)){
+					printf("scheduler hello\n");
+				}
 				
 				if( pc != pI->pc ) {
 					SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) control hazard instruction flush\n",
@@ -1245,7 +1352,7 @@ void scheduler_unit::cycle()
 					// control hazard
 					warp(warp_id).set_next_pc(pc);
 					//address now set to stack entry as well, which now always holds correct information
-					m_simt_stack[warp_id]->set_next_pc(height, pc);
+					//m_simt_stack[warp_id]->set_next_pc(height, pc);
 					warp(warp_id).ibuffer_flush();
 					//want to allow the fragment to become re-eligible for execution
 					m_simt_stack[warp_id]->reset_in_execution(height);
@@ -1265,10 +1372,12 @@ void scheduler_unit::cycle()
 						//MEMORY INSTRUCTION
 						if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) {
 							if( m_mem_out->has_free() ) {
-								m_shader->issue_warp(height, *m_mem_out,pI,active_mask,warp_id);
+								m_shader->issue_warp(height, *m_mem_out,pI,active_mask,warp_id, active_lane_count);
 								issued++;
 								issued_inst=true;
 								warp_inst_issued = true;
+								//keep track of lanes here
+								lanes_active += active_lane_count;
 							}
 						} else {
 
@@ -1277,16 +1386,20 @@ void scheduler_unit::cycle()
 							bool sfu_pipe_avail = m_sfu_out->has_free();
 							if( sp_pipe_avail && (pI->op != SFU_OP) ) {
 								// always prefer SP pipe for operations that can use both SP and SFU pipelines
-								m_shader->issue_warp(height, *m_sp_out,pI,active_mask,warp_id);
+								m_shader->issue_warp(height, *m_sp_out,pI,active_mask,warp_id, active_lane_count);
 								issued++;
 								issued_inst=true;
 								warp_inst_issued = true;
+								//keep track of lanes here
+								lanes_active += active_lane_count;
 							} else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
 								if( sfu_pipe_avail ) {
-									m_shader->issue_warp(height, *m_sfu_out,pI,active_mask,warp_id);
+									m_shader->issue_warp(height, *m_sfu_out,pI,active_mask,warp_id, active_lane_count);
 									issued++;
 									issued_inst=true;
 									warp_inst_issued = true;
+									//keep track of lanes here
+									lanes_active += active_lane_count;
 								}
 							} 
 						}
@@ -1301,7 +1414,7 @@ void scheduler_unit::cycle()
 							  (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
 			   warp(warp_id).set_next_pc(pc);
 			   //address now set to stack entry as well, which now always holds correct information
-			   m_simt_stack[warp_id]->set_next_pc(height, pc);
+			   //m_simt_stack[warp_id]->set_next_pc(height, pc);
 			   warp(warp_id).ibuffer_flush();
 			   //want to allow the fragment to become re-eligible for execution
 			   m_simt_stack[warp_id]->reset_in_execution(height);
@@ -1318,8 +1431,14 @@ void scheduler_unit::cycle()
 			warp(warp_id).ibuffer_next_frag();	
 		}
 		
+		if (issued > 1){
+			printf("Fragment Issue: Warp %u Issued %d fragments\n", warp_id, issued);
+		}
+		
 		if (issued){
 			issued_warps++;
+			//book-keeping
+			m_stats->shader_cycle_distro[2+lanes_active]++;
 		}
 
 		if ( issued ) {
@@ -1645,6 +1764,40 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst)
       printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu issued@%llu\n", 
              inst.get_uid(), m_sid, inst.warp_id(), inst.pc, gpu_tot_sim_cycle + gpu_sim_cycle, inst.get_issue_cycle()); 
    #endif
+   
+   //NEW: book-keeping for instruction commit to maintain the stack
+   		
+	unsigned height = -1;
+	std::deque<in_flight_warp>::iterator it;
+	bool flag_ibuffer_empty = true;
+	unsigned warp_id = inst.warp_id();
+	//get and clean up inflight warp entry
+	for (it = m_in_flight_warp_info.begin(); it != m_in_flight_warp_info.end(); ++it){
+		if ((it->m_cycle_issued == inst.grab_issue_cycle()) && (it->m_warp_id == inst.warp_id())){
+			 height = it->m_height;
+			 flag_ibuffer_empty = it->m_ibuffer_empty;
+			 
+			 m_in_flight_warp_info.erase(it);
+			 break;
+		 }
+	}
+	
+	//should always have a corresponding entry
+	assert (height != -1);
+	
+	//TEST code: should catch if we memory leak
+	assert(m_in_flight_warp_info.size() <= 1000);
+	
+	//make stack frame available to execute again
+	//NOTE: we don't want to allow a PC to become re-executable if there is 
+	//still an instruction in the ibuffer from that slot
+	//this causes it to be placed in the fragment_entries and cause double execution of instructions
+	if (flag_ibuffer_empty){
+		//only want the stack to be re-executable if there are no valid inst
+		//fetched from the stack already
+		m_simt_stack[warp_id]->reset_in_execution(height);
+	}
+   
   if(inst.op_pipe==SP__OP)
 	  m_stats->m_num_sp_committed[m_sid]++;
   else if(inst.op_pipe==SFU__OP)
@@ -1694,24 +1847,6 @@ void shader_core_ctx::writeback()
         unsigned warp_id = pipe_reg->warp_id();
         m_scoreboard->releaseRegisters( pipe_reg );
         m_warp[warp_id].dec_inst_in_pipeline();
-		
-		unsigned height = -1;
-		std::deque<in_flight_warp>::iterator it;
-		//get and clean up inflight warp entry
-		for (it = m_in_flight_warp_info.begin(); it != m_in_flight_warp_info.end(); ++it){
-			if ((it->m_cycle_issued == pipe_reg->grab_issue_cycle()) && (it->m_warp_id == warp_id)){
-				 height = it->m_height;
-				 m_in_flight_warp_info.erase(it);
-				 break;
-			 }
-		}
-		
-		//should always have a corresponding entry
-		assert (height != -1);
-		
-		//make stack frame available to execute again
-		m_simt_stack[warp_id]->reset_in_execution(height);
-	
         warp_inst_complete(*pipe_reg);
         m_gpu->gpu_sim_insn_last_update_sid = m_sid;
         m_gpu->gpu_sim_insn_last_update = gpu_sim_cycle;
@@ -2762,7 +2897,7 @@ void shader_core_ctx::display_pipeline(FILE *fout, int print_mem, int mask ) con
 
    fprintf(fout,"\nibuffer status:\n");
    for( unsigned i=0; i<m_config->max_warps_per_shader; i++) {
-       if( !m_warp[i].ibuffer_empty() ) 
+       if( !m_warp[i].ibuffer_frag_empty() ) 
            m_warp[i].print_ibuffer(fout);
    }
    fprintf(fout,"\n");
@@ -3200,7 +3335,9 @@ void shader_core_ctx::get_cache_stats(cache_stats &cs){
 void shader_core_ctx::get_L1I_sub_stats(struct cache_sub_stats &css) const{
     if(m_L1I){
 		for (int i = 0; i < m_L1I->num_banks(); i++){
-			m_L1I->get_sub_stats(i, css);
+			struct cache_sub_stats temp_css;
+			m_L1I->get_sub_stats(i, temp_css);
+			css = css + temp_css;
 		}
 	}
         

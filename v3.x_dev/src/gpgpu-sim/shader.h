@@ -74,7 +74,7 @@
 #define MAX_CTA_PER_SHADER 32
 
 //NEW, max concurrent warp fragments per warp
-#define MAX_WARP_FRAGMENTS 1
+#define MAX_WARP_FRAGMENTS 4
 
 //NEW, pulled definition from inside of the warp_t object
 #define IBUFFER_SIZE 2
@@ -119,6 +119,12 @@ public:
         m_membar=false;
         m_done_exit=true;
         m_last_fetch=0;
+		
+		m_frag_num=0;
+		
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			m_next[i]=0;
+		}
         
     }
     void init( address_type start_pc,
@@ -136,6 +142,7 @@ public:
         n_completed   -= active.count(); // active threads are not yet completed
         m_active_threads = active;
         m_done_exit=false;
+		
         m_frag_num=0;
 		
 		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
@@ -181,8 +188,8 @@ public:
     //increments fragment number to new fragment
     void ibuffer_next_frag()
     {
+		assert((m_frag_num+1)%MAX_WARP_FRAGMENTS < MAX_WARP_FRAGMENTS);
         m_frag_num = (m_frag_num+1)%MAX_WARP_FRAGMENTS;
-
     }
 	
 	//NEW, ibuffer_reset_frag()
@@ -196,7 +203,7 @@ public:
 
     //NEW, ibuffer_frag_empty
     //checks through the entire ibuffer to see if it is empty
-    bool ibuffer_frag_empty()
+    bool ibuffer_frag_empty() const
     {
         for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
         {
@@ -235,6 +242,21 @@ public:
             m_ibuffer[m_frag_num][i].m_valid=false; 
         }
     }
+	void ibuffer_full_flush()
+	{	
+		for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
+        {
+            for(unsigned i=0;i<IBUFFER_SIZE;i++) {
+				if( m_ibuffer[j][i].m_valid ){
+					dec_inst_in_pipeline();
+				}
+				m_ibuffer[j][i].m_inst=NULL; 
+				m_ibuffer[j][i].m_valid=false; 
+				
+				printf("Flushing ibuffer\n");
+			}
+        }
+	}
     const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_inst; }
     bool ibuffer_next_valid() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_valid; }
     //requires new entry frag_num
@@ -1934,7 +1956,7 @@ private:
     friend class scheduler_unit; //this is needed to use private issue warp.
     friend class TwoLevelScheduler;
     friend class LooseRoundRobbinScheduler;
-    void issue_warp( unsigned depth, register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id );
+    void issue_warp( unsigned depth, register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id, unsigned& active_lane_count);
     void func_exec_inst( warp_inst_t &inst );
 	
 	//fix for book-keeping after issue
@@ -1952,15 +1974,17 @@ private:
 	struct in_flight_warp{
 		in_flight_warp(){}
 		
-		in_flight_warp(unsigned warp_id, unsigned long long cycle_issued, unsigned height){
+		in_flight_warp(unsigned warp_id, unsigned long long cycle_issued, unsigned height, bool ibuffer_empty){
 			m_warp_id = warp_id;
 			m_cycle_issued = cycle_issued;
 			m_height = height;
+			m_ibuffer_empty = ibuffer_empty;
 		}
 		
 		unsigned m_warp_id;
 		unsigned long long m_cycle_issued;
 		unsigned m_height;
+		bool m_ibuffer_empty; //tracks if there are no additional inst ready to be executed
 	};
 
 	std::deque<in_flight_warp> m_in_flight_warp_info;
