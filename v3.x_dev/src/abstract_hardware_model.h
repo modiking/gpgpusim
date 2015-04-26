@@ -283,8 +283,9 @@ public:
 
     void reset();
     void launch( address_type start_pc, const simt_mask_t &active_mask );
-    void update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId );
-	
+    
+	//required for cuda-sim
+	void update( simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId );
 	//NEW counterpart, allows you to manipulate the stack at a specific height
 	void update_height( unsigned height, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId, signed * height_removed);
 	
@@ -296,13 +297,6 @@ public:
     //NEW functions
     bool     iter_get_pdom_stack(unsigned height, unsigned *pc, unsigned *rpc ) const;
     simt_mask_t &iter_get_active_mask(unsigned height);
-	
-	void reset_in_execution(int height) 
-	{ 
-		//when execution is complete, we don't care about the stack anymore
-		if (m_stack.size() > 0)
-			m_stack.at(height).m_in_execution = false;
-	}
 
 	//void set_next_pc(int height, unsigned pc) { m_stack.at(height).m_pc = pc;}
     //NEW structure to store fragments
@@ -333,10 +327,9 @@ protected:
         address_type m_recvg_pc;
         unsigned long long m_branch_div_cycle;
         stack_entry_type m_type;
-		bool m_in_execution; //NEW: used to store whether an entry is already in the middle of execution
-							 //by default the value is 0, gets set to 1 when its gets called in for execution
+		
         simt_stack_entry() : 
-            m_pc(-1), m_calldepth(0), m_active_mask(), m_recvg_pc(-1), m_branch_div_cycle(0), m_type(STACK_ENTRY_TYPE_NORMAL), m_in_execution(false) { };
+            m_pc(-1), m_calldepth(0), m_active_mask(), m_recvg_pc(-1), m_branch_div_cycle(0), m_type(STACK_ENTRY_TYPE_NORMAL) { };
     };
 
     std::deque<simt_stack_entry> m_stack;
@@ -1037,6 +1030,7 @@ class core_t {
         bool  ptx_thread_done( unsigned hw_thread_id ) const ;
 		//NEW: modified to update at a specific height
         void updateSIMTStack_height(unsigned height, unsigned warpId, warp_inst_t * inst, signed * height_removed);
+		//still required for cuda-sim
 		void updateSIMTStack(unsigned warpId, warp_inst_t * inst);
         void initilizeSIMTStack(unsigned warp_count, unsigned warps_size);
         void deleteSIMTStack();

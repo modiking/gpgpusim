@@ -53,7 +53,6 @@
 
 //NEW STUFF, flag to determine whether to print some debug messages
 #define DEBUG_PRINT 1
-//#define MAX_WARP_FRAGMENTS 4
     
 
 /////////////////////////////////////////////////////////////////////////////
@@ -134,7 +133,7 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
 	
 	//NEW: initialize multiple instruction buffers
 	m_inst_fetch_buffers.resize(MAX_WARP_FRAGMENTS);
-    
+
     //scedulers
     //must currently occur after all inputs have been initialized.
     //concrete_scheduler just stores type of scheduler
@@ -631,7 +630,7 @@ void shader_core_ctx::decode()
 		
 		//set valid to false in decode
 		m_inst_fetch_buffers[i].m_valid = false;
-	}
+	} 
 }
 
 void shader_core_ctx::fetch()
@@ -642,7 +641,6 @@ void shader_core_ctx::fetch()
 	
 	unsigned fetched = 0;
 
-	//printf( "shader_core_ctx::fetch()\n" );
 	// find an active warp with space in instruction buffer that is not already waiting on a cache miss
 	// and get next 1-2 instructions from i-cache...
 	for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
@@ -654,7 +652,7 @@ void shader_core_ctx::fetch()
 		}
 		
 		//only have X number of fetch units total, so once we reach that we can't continue
-		if (fetched >= MAX_WARP_FRAGMENTS){
+		if (fetched == MAX_WARP_FRAGMENTS){
 			break;
 		}
 		
@@ -675,28 +673,24 @@ void shader_core_ctx::fetch()
 			}
 			if( did_exit ) {
 				m_warp[warp_id].set_done_exit();
-				//currently a band-aid, need to fix later
-				//m_warp[warp_id].ibuffer_full_flush();
 			}
+		}
+		
+		//if there are already instructions in the ibuffer, never fetch
+		if (!m_warp[warp_id].ibuffer_frag_empty()){
+			continue;
 		}
 		
 		/*if((gpu_tot_sim_cycle+gpu_sim_cycle == 12727)){
 			printf("%Lu shader %u checking warp: %d i = %u max = \n", gpu_tot_sim_cycle+gpu_sim_cycle, m_sid ,warp_id, i, m_config->max_warps_per_shader);
 		}*/
 		
-		//because we allow multiple execution, it is possible for a warp to execute when 1 side
-		//of the branch gets on the stack, only for it to be eligible again when another warp comes on
-		//and we go through all executable fragments again
-		//Therefore, we need book-keeping on the fragments themselves to tell whether they are already in execution
-		//or not
+		
 		// this code fetches instructions from the i-cache or generates memory requests
-		// if the warp isn't done and we we don't have outstanding misses (blocking)
+		// if the warp isn't done and we we don't have outstanding misses (BLOCKING)
 		// and there's no entries in the entirety of the icache
-		if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending())// && m_warp[warp_id].ibuffer_frag_empty() ) 
+		if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending())
 		{
-			//looking at ibuffer_frag_empty seems to stop divergence for some reason, may cause things to go into lockstep
-
-			//If there's an empty slot in the ibuffer, we want to fill it
 		
 			//fragment entries are only loaded in/updated during fetch
 			//this means that for a warp to get more instructions, it MUST execute
@@ -704,38 +698,6 @@ void shader_core_ctx::fetch()
 			if (m_fragment_entries[warp_id].size() == 0){
 				m_fragment_entries[warp_id] = m_simt_stack[warp_id]->get_fragments();
 			}
-			/*else{
-				//if there are fragments, then we want to grab them anyways and merge results
-				//this means we always have the most up to date copy
-				//and prevents double execution from stale copies
-				std::deque<simt_stack::fragment_entry> temp_fragment_entries = m_simt_stack[warp_id]->get_fragments();
-				
-				//merge lists
-				for (std::deque<simt_stack::fragment_entry>::iterator it = temp_fragment_entries.begin(); 
-				it != temp_fragment_entries.end(); 
-				++it){
-					for (std::deque<simt_stack::fragment_entry>::iterator it2 = m_fragment_entries[warp_id].begin(); 
-					it2 != m_fragment_entries[warp_id].end(); 
-					++it2){
-						if (it2->height == it->height){
-							//update
-							it2->pc = it->pc;
-							it2->height = it->height;
-						}
-					}
-					
-					//otherwise, just add it at the end
-					m_fragment_entries[warp_id].push_back(*it);
-				}
-				
-				temp_fragment_entries.clear();
-				
-			}*/
-			
-			//break out if there's no more valid fragments
-			//if (m_fragment_entries[warp_id].size() == 0){
-			//	break;
-			//}
 
 			if (DEBUG_PRINT){
 				if (m_fragment_entries[warp_id].size() > 1){
@@ -758,6 +720,7 @@ void shader_core_ctx::fetch()
 			}*/
 			
 			unsigned fragment_size = m_fragment_entries[warp_id].size();
+			unsigned fragments_checked = 0;
 			
 			//go through the ibuffer
 			for (int j = 0; j < MAX_WARP_FRAGMENTS; j++){
@@ -782,61 +745,37 @@ void shader_core_ctx::fetch()
 				}
 				
 				//also break out if there's no more fragments currently available
-				if (fetched >= MAX_WARP_FRAGMENTS){
+				if (fetched == MAX_WARP_FRAGMENTS){
 					break;
 				}
 				
 				//break if we've fetched all fragments
-				if (fetched >= fragment_size){
+				if (fragments_checked == fragment_size){
 					break;
 				}
 				
-				//if current buffer has an entry, we want to check if it shares a height
+				//if current buffer has an entry, skip it
 				if (!m_warp[warp_id].ibuffer_empty()){
-					//go through all entries, ending up back at the original
-					/*for (int k = 0; k < IBUFFER_SIZE; k++){
-						if (m_warp[warp_id].ibuffer_next_valid()){
-							if (m_fragment_entries[warp_id].size() > 0){
-								if (m_warp[warp_id].ibuffer_get_height() == highest_fragment->height){
-									//we can safely ignore this fragment, as it will be fetched again after the entire buffer empties
-									m_fragment_entries[warp_id].erase(highest_fragment);
-									++highest_fragment;
-									fetched++;
-								}
-							}
-						}
-						
-						m_warp[warp_id].ibuffer_step();
-					}*/
 					continue;
 				}
 				
 				//go through all fragments, either create new mem fetches or service
 				//those that came back, commit only to space free in inst buffer
 				
-				//Otherwise, create fetch request for fragment with this ibuffer
-				//address_type pc  = m_warp[warp_id].get_pc();
-				
 				//we get the pc from each individual fragment now
 				//execute fragments from top of the stack (back of m_fragment_entries queue) first
 				address_type pc = highest_fragment->pc;
-				
-				//printf("warp_id: %d\n", warp_id);
-				
-				//assert(m_fragment_entries[warp_id].size() > 0);
-				
-				//assert(highest_fragment->height < 10);
 				
 				//update ibuffer with height information
 				m_warp[warp_id].ibuffer_store_height(highest_fragment->height);
 				
 				//printing
-				if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12400) && (warp_id == 19) && (m_sid == 11)){
+				/*if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12400) && (warp_id == 19) && (m_sid == 11)){
 				printf( "Cycle %Lu: Fetching Warp (warp_id %u) instruction (%s) at stack height %u for ibuffer %d\n",
 							gpu_tot_sim_cycle+gpu_sim_cycle,
 							 warp_id,
 							 ptx_get_insn_str( pc).c_str(), highest_fragment->height, j );
-				}
+				}*/
 				
 				address_type ppc = pc + PROGRAM_MEM_START;
 				unsigned nbytes=16; 
@@ -874,6 +813,7 @@ void shader_core_ctx::fetch()
 					unsigned prev_size = m_fragment_entries[warp_id].size();
 					//remove from fragment entries
 					m_fragment_entries[warp_id].erase(highest_fragment);
+					//sanity check
 					assert(prev_size > m_fragment_entries[warp_id].size());
 					delete mf;
 				} else {
@@ -885,6 +825,7 @@ void shader_core_ctx::fetch()
 				//proceed to next fragment entry
 				++highest_fragment;
 				fetched++;
+				fragments_checked++;
 
 			}
 			
@@ -907,138 +848,6 @@ void shader_core_ctx::fetch()
 		}
 	}
 	
-	//printf( "shader_core_ctx::fetch() end\n" );
-}
-
-void shader_core_ctx::fill_inst_buffer(unsigned warp_id){
-
-	// this code fetches instructions from the i-cache or generates memory requests
-	// if the warp isn't done and we we don't have outstanding misses (blocking)
-	// and there's no entries in the entirety of the icache
-	if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending() && m_warp[warp_id].ibuffer_frag_empty() ) {
-
-		//If there's an empty slot in the ibuffer, we want to fill it
-	
-		//fragment entries are only loaded in/updated during fetch
-		//this means that for a warp to get more instructions, it MUST execute
-		//every instruction from the previous fetch
-		if (m_fragment_entries[warp_id].size() == 0){
-			m_fragment_entries[warp_id] = m_simt_stack[warp_id]->get_fragments();
-		}
-		
-		//break out if there's no more valid fragments
-		if (m_fragment_entries[warp_id].size() == 0){
-			return;
-		}
-
-		if (DEBUG_PRINT){
-			if (m_fragment_entries[warp_id].size() > 1){
-			  printf("Warp %d has fragments\n", warp_id);
-			  for (int j = m_fragment_entries[warp_id].size()-1; j >= 0 ; j--){
-				printf("Height (%d): PC = %s\n", m_fragment_entries[warp_id].at(j).height, ptx_get_insn_str(m_fragment_entries[warp_id].at(j).pc).c_str());
-			  }
-			}
-		}
-		
-		//create iterator starting at end of fragment_entries (top of the stack)
-		std::deque<simt_stack::fragment_entry>::iterator highest_fragment = m_fragment_entries[warp_id].begin();
-		
-		//go through the ibuffer
-		for (int j = 0; j < MAX_WARP_FRAGMENTS; j++){
-			
-			if (j == 0){
-				//initially reset
-				m_warp[warp_id].ibuffer_reset_frag();
-			}
-			else{
-				//otherwise step
-				m_warp[warp_id].ibuffer_next_frag();
-			}
-			
-			//move on if current buffer has an entry
-			if (!m_warp[warp_id].ibuffer_empty()){
-				continue;
-			}
-			
-			//break out if there's no more valid fragments
-			if (m_fragment_entries[warp_id].size() == 0){
-				return;
-			}
-			
-			//also break out if there's no room in instruction fetch buffer
-			if(inst_buffer_full()){
-				return;
-			}
-			
-			//also break out if there's no more fragments currently available
-			if (highest_fragment == m_fragment_entries[warp_id].end()){
-				return;
-			}
-			
-			//go through all fragments, either create new mem fetches or service
-			//those that came back, commit only to space free in inst buffer
-			
-			//Otherwise, create fetch request for fragment with this ibuffer
-			//address_type pc  = m_warp[warp_id].get_pc();
-			
-			//we get the pc from each individual fragment now
-			//execute fragments from top of the stack (back of m_fragment_entries queue) first
-			address_type pc = highest_fragment->pc;
-			
-			//update ibuffer with height information
-			m_warp[warp_id].ibuffer_store_height(highest_fragment->height);
-			
-			
-			address_type ppc = pc + PROGRAM_MEM_START;
-			unsigned nbytes=16; 
-			unsigned offset_in_block = pc & (m_config->m_L1I_config.get_line_sz()-1);
-			if( (offset_in_block+nbytes) > m_config->m_L1I_config.get_line_sz() )
-				nbytes = (m_config->m_L1I_config.get_line_sz()-offset_in_block);
-
-			// TODO: replace with use of allocator
-			// mem_fetch *mf = m_mem_fetch_allocator->alloc()
-			mem_access_t acc(INST_ACC_R,ppc,nbytes,false);
-			mem_fetch *mf = new mem_fetch(acc,
-										  NULL/*we don't have an instruction yet*/,
-										  READ_PACKET_SIZE,
-										  warp_id,
-										  m_sid,
-										  m_tpc,
-										  m_memory_config );
-			std::list<cache_event> events;
-			//NEW: even though we're using the banked cache, access API is still the same
-			//I believe events tag will ensure that a fetch that got serviced below after L1I cycle will return a hit
-			enum cache_request_status status = m_L1I->access( (new_addr_type)ppc, mf, gpu_sim_cycle+gpu_tot_sim_cycle,events);
-			if( status == MISS ) {
-				m_last_warp_fetched=warp_id;
-				//setting as pending now creates an entry associated with PC
-				m_warp[warp_id].set_imiss_pending(ppc);
-				m_warp[warp_id].set_last_fetch(gpu_sim_cycle);
-			} else if( status == HIT ) {
-				m_last_warp_fetched=warp_id;
-				//m_inst_fetch_buffer = ifetch_buffer_t(pc,nbytes,warp_id);
-				//have multiple instruction buffers instead of 1 now
-				assert(!inst_buffer_full());
-				add_to_inst_buffer(ifetch_buffer_t(pc,nbytes,warp_id,j));
-				m_warp[warp_id].set_last_fetch(gpu_sim_cycle);
-			
-				unsigned prev_size = m_fragment_entries[warp_id].size();
-				//remove from fragment entries
-				m_fragment_entries[warp_id].erase(highest_fragment);
-				assert(prev_size > m_fragment_entries[warp_id].size());
-				delete mf;
-			} else {
-				m_last_warp_fetched=warp_id;
-				assert( status == RESERVATION_FAIL );
-				delete mf;
-			}
-			
-			//proceed to next fragment entry
-			++highest_fragment;
-
-		}
-		
-	}
 }
 
 void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
@@ -1078,43 +887,17 @@ void shader_core_ctx::issue_warp( unsigned height, register_set& pipe_reg_set, c
     m_scoreboard->reserveRegisters(*pipe_reg);
 	m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
 	
-	//add into queue to associate heights with the instructions
-	m_in_flight_warp_info.push_back(in_flight_warp(warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, height, m_warp[warp_id].ibuffer_empty()));
-	
 	//this case occurs on warp exit, in which case we don't need this book-keeping
 	if ((height_removed == 1) && (height == 0))
 	{
 		return;
 	}
 	
-	//if we hit divergence (height removed is negative), then the frame must be reset in 
-	//execution to allow it to be executed. It should naturally be skipped because it 
-	//contains a divergence PC until convergence has occured
-	if (height_removed < 0){
-		m_simt_stack[warp_id]->reset_in_execution(height);
-	}
-	
-	//The address should've have automatically been calculated in updateSIMTStack_height()
-	//then applied in update_height()
-	
-	//if we removed from stack (aka reconverged), update the PC at reconverge entry
-	/*if (height_removed > 0){
-		m_simt_stack[warp_id]->set_next_pc(height-height_removed, next_inst->pc + next_inst->isize);
-	}
-	else
-	{
-		m_simt_stack[warp_id]->set_next_pc(height, next_inst->pc + next_inst->isize);
-	}*/
-	
 	//book-keeping
 	//height updates from the middle/bottom of the stack must propogate to all current heights
 	//on exit we can remove 1 from a height of 0
 	assert((signed) height >= height_removed);
-	if (height_removed != 0){
-		//in addition, we want to make sure the ibuffer is flushed 
-		//whenever height is changed, as that signals either 2 new control paths in new fragment buffers or a reconvergence of a stack frame who's new result is once again in a new buffer
-		m_warp[warp_id].ibuffer_flush();
-		
+	if (height_removed != 0){	
 		fix_heights(height, height_removed, warp_id);
 	}
 }
@@ -1132,27 +915,13 @@ void shader_core_ctx::fix_heights(unsigned height, signed height_removed, unsign
 	//book keep buffer
 	for (int j = 0; j < MAX_WARP_FRAGMENTS; j++){
 		
-		if (j == 0){
-			//initially reset
-			m_warp[warp_id].ibuffer_reset_frag();
-		}
-		else{
-			//otherwise step
-			m_warp[warp_id].ibuffer_next_frag();
-		}
+		//no need to reset, and this brings us back to where we need to be for
+		//do_on_warp_issued
+		m_warp[warp_id].ibuffer_next_frag();
 		
 		if (m_warp[warp_id].ibuffer_get_height() >= height){
 			//update
 			m_warp[warp_id].ibuffer_store_height(m_warp[warp_id].ibuffer_get_height() - height_removed);
-		}
-	}
-	
-	//book keep in-flight heights
-	for (int j = 0; j <= m_in_flight_warp_info.size()-1; j++){
-		if (m_in_flight_warp_info.at(j).m_warp_id == warp_id){
-			if (m_in_flight_warp_info.at(j).m_height >= height){
-				m_in_flight_warp_info.at(j).m_height -= height_removed;
-			}
 		}
 	}
 	
@@ -1265,8 +1034,6 @@ void scheduler_unit::cycle()
     bool ready_inst = false;  // of the valid instructions, there was one not waiting for pending register writes
     bool issued_inst = false; // of these we issued one
 
-	//printf( "scheduler_unit::cycle()\n" );
-	
 	//NOTE: this means we will execute partial warps if they have their instructions decoded
 	//order_warps as of yet does not take this into account, if we want to give preference to fuller warps then 
 	//it must be made aware of this
@@ -1335,6 +1102,7 @@ void scheduler_unit::cycle()
 							 ptx_get_insn_str( pc).c_str(), height );
 			}
 			
+			//temporary storage for active lane count
 			unsigned active_lane_count = 0;
 		  
 			//should still check if there's at least 1 instruction
@@ -1342,26 +1110,19 @@ void scheduler_unit::cycle()
 				//sanity check that the instruction is valid
 				assert(valid_stack_entry && valid);
 				
-				if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12488) && (warp_id == 19) && (m_shader->m_sid == 11)){
-					printf("scheduler hello\n");
-				}
-				
 				if( pc != pI->pc ) {
 					SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) control hazard instruction flush\n",
 								   (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
 					// control hazard
+					// stack already has correct PC as the branch updated it already
 					warp(warp_id).set_next_pc(pc);
-					//address now set to stack entry as well, which now always holds correct information
-					//m_simt_stack[warp_id]->set_next_pc(height, pc);
 					warp(warp_id).ibuffer_flush();
-					//want to allow the fragment to become re-eligible for execution
-					m_simt_stack[warp_id]->reset_in_execution(height);
 				} else {
 
 					//HAVE AN INSTRUCTION THAT CAN BE ISSUED
 					valid_inst = true;
 					if ( !m_scoreboard->checkCollision(warp_id, pI) ) {
-
+						
 						//NO SCOREBOARD CONFLICTS
 						SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
 									   (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
@@ -1412,12 +1173,9 @@ void scheduler_unit::cycle()
 			   // this case can happen after a return instruction in diverged warp
 			   SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) return from diverged warp flush\n",
 							  (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+			   // stack already has correct PC as the branch updated it already
 			   warp(warp_id).set_next_pc(pc);
-			   //address now set to stack entry as well, which now always holds correct information
-			   //m_simt_stack[warp_id]->set_next_pc(height, pc);
 			   warp(warp_id).ibuffer_flush();
-			   //want to allow the fragment to become re-eligible for execution
-			   m_simt_stack[warp_id]->reset_in_execution(height);
 			}
 			if(warp_inst_issued) {
 				SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) issued %u instructions\n",
@@ -1432,7 +1190,7 @@ void scheduler_unit::cycle()
 		}
 		
 		if (issued > 1){
-			printf("Fragment Issue: Warp %u Issued %d fragments\n", warp_id, issued);
+			printf("Cycle %Lu:: Warp %u Issued %d fragments\n", gpu_tot_sim_cycle+gpu_sim_cycle, warp_id, issued);
 		}
 		
 		if (issued){
@@ -1454,7 +1212,9 @@ void scheduler_unit::cycle()
 				  m_last_supervised_issued = supervised_iter;
 			  }
 		  }
-		  //break;
+		  //the original system had this because double issue means double issue per warp
+		  //not across warps, so we remain faithful
+		  break;
 		}				
 	
 	}
@@ -1467,7 +1227,6 @@ void scheduler_unit::cycle()
     else if( !issued_inst ) 
         m_stats->shader_cycle_distro[2]++; // pipeline stalled
 	
-	//printf( "scheduler_unit::cycle() end\n" );
 }
 
 void scheduler_unit::do_on_warp_issued( unsigned warp_id,
@@ -1764,39 +1523,6 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst)
       printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu issued@%llu\n", 
              inst.get_uid(), m_sid, inst.warp_id(), inst.pc, gpu_tot_sim_cycle + gpu_sim_cycle, inst.get_issue_cycle()); 
    #endif
-   
-   //NEW: book-keeping for instruction commit to maintain the stack
-   		
-	unsigned height = -1;
-	std::deque<in_flight_warp>::iterator it;
-	bool flag_ibuffer_empty = true;
-	unsigned warp_id = inst.warp_id();
-	//get and clean up inflight warp entry
-	for (it = m_in_flight_warp_info.begin(); it != m_in_flight_warp_info.end(); ++it){
-		if ((it->m_cycle_issued == inst.grab_issue_cycle()) && (it->m_warp_id == inst.warp_id())){
-			 height = it->m_height;
-			 flag_ibuffer_empty = it->m_ibuffer_empty;
-			 
-			 m_in_flight_warp_info.erase(it);
-			 break;
-		 }
-	}
-	
-	//should always have a corresponding entry
-	assert (height != -1);
-	
-	//TEST code: should catch if we memory leak
-	assert(m_in_flight_warp_info.size() <= 1000);
-	
-	//make stack frame available to execute again
-	//NOTE: we don't want to allow a PC to become re-executable if there is 
-	//still an instruction in the ibuffer from that slot
-	//this causes it to be placed in the fragment_entries and cause double execution of instructions
-	if (flag_ibuffer_empty){
-		//only want the stack to be re-executable if there are no valid inst
-		//fetched from the stack already
-		m_simt_stack[warp_id]->reset_in_execution(height);
-	}
    
   if(inst.op_pipe==SP__OP)
 	  m_stats->m_num_sp_committed[m_sid]++;

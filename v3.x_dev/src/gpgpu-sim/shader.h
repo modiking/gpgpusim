@@ -242,21 +242,6 @@ public:
             m_ibuffer[m_frag_num][i].m_valid=false; 
         }
     }
-	void ibuffer_full_flush()
-	{	
-		for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
-        {
-            for(unsigned i=0;i<IBUFFER_SIZE;i++) {
-				if( m_ibuffer[j][i].m_valid ){
-					dec_inst_in_pipeline();
-				}
-				m_ibuffer[j][i].m_inst=NULL; 
-				m_ibuffer[j][i].m_valid=false; 
-				
-				printf("Flushing ibuffer\n");
-			}
-        }
-	}
     const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_inst; }
     bool ibuffer_next_valid() { return m_ibuffer[m_frag_num][m_next[m_frag_num]].m_valid; }
     //requires new entry frag_num
@@ -1945,8 +1930,6 @@ private:
     virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid);
     address_type next_pc( int tid ) const;
     void fetch();
-	//NEW
-	void fill_inst_buffer(unsigned warp_id);
 	
     void register_cta_thread_exit( unsigned cta_num );
 

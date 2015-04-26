@@ -412,8 +412,6 @@ void warp_inst_t::print_memory_accesses(unsigned shader_id, unsigned long long c
 	
 }
 
-
-	
 void warp_inst_t::memory_coalescing_arch_13( bool is_write, mem_access_type access_type )
 {
     // see the CUDA manual where it discusses coalescing rules before reading this
@@ -715,68 +713,38 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 
     //if there is only 1 entry, it automatically is a fragment
 	
-	//we should always have at least 1 entry
-	//assert(m_stack.size() > 0);
-
     //iterate from top of the stack to bottom
     for (int i = m_stack.size()-1; i >= 0; i--)
-    {
-		
-	  //if the entry is currently in execution, we ignore it
-	  if (m_stack.at(i).m_in_execution)
-	    continue;	
-		
-	  //in the special case that the only instruction is "exit", we can detect it by checking if the
-	  //reconvergence pc = (unsigned)-1, if it is then it should be added as an executable fragment
-	  //note we only treat it as executable if it sits on the top of the stack
-	  //this covers the case where "exit" is considered PDOM of divergent instructions
-	  if ((m_stack.at(i).m_recvg_pc == (unsigned)-1) && (i == m_stack.size()-1) && (m_stack.at(i).m_branch_div_cycle != 0)){
-		//printf("Warp %u about to exit\n", m_warp_id);
-		//assert(m_stack.at(i).m_in_execution == false);
-		//if there is an exist it will be pdom for everyone
-		assert(m_stack.size() == 1);
+    {	  
+      //Top of stack is always executable, as that was the previous paradigm  
+	  if (i == (m_stack.size()-1)){
 		new_fragment_entry.pc = m_stack.at(i).m_pc;
         new_fragment_entry.height = i;
         m_fragment_entries.push_back(new_fragment_entry);
         fragment_mask.push_back(m_stack.at(i).m_active_mask);
 		prev_op = 0;
-		
-		//update entry on stack to show its currently in execution
-		m_stack.at(i).m_in_execution = true;
+	  }	  
+	  //if the stack doesn't have a divergence tagged, we add it as executable
+	  //a 0 means its not a diverged branch
+	  else if (m_stack.at(i).m_branch_div_cycle == 0)
+	  {
+		new_fragment_entry.pc = m_stack.at(i).m_pc;
+		new_fragment_entry.height = i;
+		m_fragment_entries.push_back(new_fragment_entry);
+		fragment_mask.push_back(m_stack.at(i).m_active_mask);
+		prev_op = 0;
 	  }
-	  else{
-		  
-		  
-		  
-		  //if the stack doesn't have a divergence tagged, we add it as executable
-		  //a 0 means its not a diverged branch
-		  if (m_stack.at(i).m_branch_div_cycle == 0)
-		  {
-			new_fragment_entry.pc = m_stack.at(i).m_pc;
-			new_fragment_entry.height = i;
-			m_fragment_entries.push_back(new_fragment_entry);
-			fragment_mask.push_back(m_stack.at(i).m_active_mask);
-			prev_op = 0;
-			
-			//update entry on stack to show its currently in execution
-			m_stack.at(i).m_in_execution = true;
-		  }
-		  //NOTE: the stack is also used for function call? operations
-		  //the function call has a tagged divergence PC
-		  //we only want the highest call entry to be executable, so we ignore any more
-		  //until we hit a non-call entry
-		  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
-			new_fragment_entry.pc = m_stack.at(i).m_pc;
-			new_fragment_entry.height = i;
-			m_fragment_entries.push_back(new_fragment_entry);
-			fragment_mask.push_back(m_stack.at(i).m_active_mask);
-			prev_op = 1;
-			
-			//update entry on stack to show its currently in execution
-			m_stack.at(i).m_in_execution = true;
-		  }
-	  }
-	  
+	  //NOTE: the stack is also used for function call? operations
+	  //the function call has a tagged divergence PC
+	  //we only want the highest call entry to be executable, so we ignore any more
+	  //until we hit a non-call entry
+	  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
+		new_fragment_entry.pc = m_stack.at(i).m_pc;
+		new_fragment_entry.height = i;
+		m_fragment_entries.push_back(new_fragment_entry);
+		fragment_mask.push_back(m_stack.at(i).m_active_mask);
+		prev_op = 1;
+	  }   
     }
 	
     //TEST code: print out fragments if there are more than 2
@@ -807,8 +775,6 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
       assert(!(composite_mask & fragment_mask.at(j)).any());
       composite_mask |= fragment_mask.at(j);
     }
-
-	//printf("end of get fragments\n");
 	
     return m_fragment_entries;
 }
@@ -841,11 +807,6 @@ void simt_stack::print (FILE *fout) const
             fprintf(fout," " );
         }
         ptx_print_insn( stack_entry.m_pc, fout );
-		if (stack_entry.m_in_execution){
-			fprintf(fout, " E");
-		} else {
-			fprintf(fout, " NE");
-		}
         fprintf(fout,"\n");
     }
 }
@@ -856,8 +817,10 @@ void simt_stack::remove_to_height(unsigned height){
 
 	m_temp_stack.clear();
 	
+	unsigned num_removed = m_stack.size() - (height + 1);
+	
 	//pop from back of main stack, push to back
-	for (unsigned i = 0; i < m_stack.size() - (height + 1); i++){
+	for (unsigned i = 0; i < num_removed; i++){
 		m_temp_stack.push_back(m_stack.back());
 		m_stack.pop_back();
 	}
@@ -866,54 +829,37 @@ void simt_stack::remove_to_height(unsigned height){
 }
 
 void simt_stack::add_back_top(){
-	//printf("Adding back %u entries\n", m_temp_stack.size());
+	
+	unsigned num_added = m_temp_stack.size();
 	
 	//to re-integrate, pop back from temp into main stack
-	for (unsigned i = 0; i < m_temp_stack.size(); i++){
+	for (unsigned i = 0; i < num_added; i++){
 		m_stack.push_back(m_temp_stack.back());
 		m_temp_stack.pop_back();
 	}
 	
 	//make sure we got every member
 	assert(m_temp_stack.size() == 0);
-	
-	//make sure stack has at least 1 member
-	//assert(m_stack.size() > 0);
-	
-	//actually, it is possible to have 0 entries, which corresponds to an exit
 }
 
 void simt_stack::update_height( unsigned height, simt_mask_t &thread_done, addr_vector_t &next_pc, address_type recvg_pc, op_type next_inst_op, unsigned warpId, signed * height_removed)
 {
-	
-	//printf( "simt_stack::update_height\n" );
     assert(m_stack.size() > 0);
 
     assert( next_pc.size() == m_warp_size );
-	
-	//printf("Before remove height\n");
-	//simt_stack::print(stdout);
+
 	//easiest way to update specific entries is to pop the stack back to the entry
 	//manipulate it as if it was the top, then re-add the entries back
 	remove_to_height(height);
 	
 	unsigned initial_height = m_stack.size();
 	
-	//printf("After remove height\n");
-	//simt_stack::print(stdout);
-
 	//proceed along normally
     simt_mask_t  top_active_mask = m_stack.back().m_active_mask;
     address_type top_recvg_pc = m_stack.back().m_recvg_pc;
     address_type top_pc = m_stack.back().m_pc; // the pc of the instruction just executed
     stack_entry_type top_type = m_stack.back().m_type;
-	
-	//update entry on stack to show its currently in execution
-	//by default if we get to this point, the entry is now fair game to be executed again
-	//m_stack.back().m_in_execution = false;
 
-    //new code
-    int old_stack_size = m_stack.size();
 
     assert(top_active_mask.any());
 
@@ -957,9 +903,7 @@ void simt_stack::update_height( unsigned height, simt_mask_t &thread_done, addr_
             new_stack_entry.m_branch_div_cycle = gpu_sim_cycle+gpu_tot_sim_cycle;
             new_stack_entry.m_type = STACK_ENTRY_TYPE_CALL;
             m_stack.push_back(new_stack_entry);
-			
-			//reset m_in_execution
-			//m_stack.back().m_in_execution = false;
+
 			//track removals
 			*height_removed = initial_height - m_stack.size();
 			//before every return, return stack to the way it was
@@ -979,9 +923,7 @@ void simt_stack::update_height( unsigned height, simt_mask_t &thread_done, addr_
                 assert(m_stack.back().m_type==STACK_ENTRY_TYPE_NORMAL);
                 m_stack.pop_back();
             }
-			
-			//reset m_in_execution
-			//m_stack.back().m_in_execution = false;
+
 			//track removals
 			*height_removed = initial_height - m_stack.size();			
 			//before every return, return stack to the way it was
@@ -1024,39 +966,13 @@ void simt_stack::update_height( unsigned height, simt_mask_t &thread_done, addr_
         m_stack.push_back(simt_stack_entry());
     }
     assert(m_stack.size() > 0);
-    //NEW CODE
-    //track stack size in order to determine when divergence occurs/is resolved
-    //a larger old value means we have "popped" off the stack
-    /*
-    if (old_stack_size > m_stack.size()-1) {
-        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
-        fprintf(Divergence_Print_File1, "Warp %d has reconverged, Divergence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
-        print(Divergence_Print_File1);
-        fclose(Divergence_Print_File1);
-    }
-    */
-
+	
     m_stack.pop_back();
-
-    /*
-    //a smaller old value means we have added to the stack
-    if(old_stack_size < m_stack.size()){
-        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
-        fprintf(Divergence_Print_File1, "Warp %d has diverged, Diverence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
-        print(Divergence_Print_File1);
-        fclose(Divergence_Print_File1);
-    }
-    */
-
 
     if (warp_diverged) {
         ptx_file_line_stats_add_warp_divergence(top_pc, 1); 
     }
 	
-	//printf("Before add_back_top\n");
-	//simt_stack::print(stdout);
-	
-	//m_in_execution was reset at beginning
 	//track removals
 	*height_removed = initial_height - m_stack.size();	
 	//before every return, return stack to the way it was
@@ -1074,10 +990,7 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
     address_type top_recvg_pc = m_stack.back().m_recvg_pc;
     address_type top_pc = m_stack.back().m_pc; // the pc of the instruction just executed
     stack_entry_type top_type = m_stack.back().m_type;
-
-    //new code
-    int old_stack_size = m_stack.size();
-
+	
     assert(top_active_mask.any());
 
     const address_type null_pc = -1;
@@ -1173,30 +1086,8 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
         m_stack.push_back(simt_stack_entry());
     }
     assert(m_stack.size() > 0);
-    //NEW CODE
-    //track stack size in order to determine when divergence occurs/is resolved
-    //a larger old value means we have "popped" off the stack
-    /*
-    if (old_stack_size > m_stack.size()-1) {
-        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
-        fprintf(Divergence_Print_File1, "Warp %d has reconverged, Divergence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
-        print(Divergence_Print_File1);
-        fclose(Divergence_Print_File1);
-    }
-    */
 
     m_stack.pop_back();
-
-    /*
-    //a smaller old value means we have added to the stack
-    if(old_stack_size < m_stack.size()){
-        FILE* Divergence_Print_File1 = fopen("Divergence_Print_File.txt", "a");
-        fprintf(Divergence_Print_File1, "Warp %d has diverged, Diverence Stack:%d, PC:%llu\n", warpId, m_stack.size(), m_stack.back().m_pc);
-        print(Divergence_Print_File1);
-        fclose(Divergence_Print_File1);
-    }
-    */
-
 
     if (warp_diverged) {
         ptx_file_line_stats_add_warp_divergence(top_pc, 1); 
