@@ -710,6 +710,10 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 	int prev_op = 0;
 	
     m_fragment_entries.clear();
+	
+	//to get around weird control paths, give priority to higher
+	//fragments when masks collide and prevent lower ones from executing
+	simt_mask_t running_composite_mask = 0;
 
     //if there is only 1 entry, it automatically is a fragment
 	
@@ -718,32 +722,47 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
     {	  
       //Top of stack is always executable, as that was the previous paradigm  
 	  if (i == (m_stack.size()-1)){
-		new_fragment_entry.pc = m_stack.at(i).m_pc;
-        new_fragment_entry.height = i;
-        m_fragment_entries.push_back(new_fragment_entry);
-        fragment_mask.push_back(m_stack.at(i).m_active_mask);
-		prev_op = 0;
+		//check for mask collisions with higher fragments
+		if (!(running_composite_mask & m_stack.at(i).m_active_mask).any()){
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			fragment_mask.push_back(m_stack.at(i).m_active_mask);
+			prev_op = 0;
+			//update mask
+			running_composite_mask |= m_stack.at(i).m_active_mask;
+		}
+			
 	  }	  
 	  //if the stack doesn't have a divergence tagged, we add it as executable
 	  //a 0 means its not a diverged branch
-	  else if (m_stack.at(i).m_branch_div_cycle == 0)
-	  {
-		new_fragment_entry.pc = m_stack.at(i).m_pc;
-		new_fragment_entry.height = i;
-		m_fragment_entries.push_back(new_fragment_entry);
-		fragment_mask.push_back(m_stack.at(i).m_active_mask);
-		prev_op = 0;
+	  else if (m_stack.at(i).m_branch_div_cycle == 0){
+		
+		if (!(running_composite_mask & m_stack.at(i).m_active_mask).any()){
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			fragment_mask.push_back(m_stack.at(i).m_active_mask);
+			prev_op = 0;
+			//update mask
+			running_composite_mask |= m_stack.at(i).m_active_mask;
+		}
 	  }
 	  //NOTE: the stack is also used for function call? operations
 	  //the function call has a tagged divergence PC
 	  //we only want the highest call entry to be executable, so we ignore any more
 	  //until we hit a non-call entry
 	  else if ((m_stack.at(i).m_type == STACK_ENTRY_TYPE_CALL) && (prev_op != 1)){
-		new_fragment_entry.pc = m_stack.at(i).m_pc;
-		new_fragment_entry.height = i;
-		m_fragment_entries.push_back(new_fragment_entry);
-		fragment_mask.push_back(m_stack.at(i).m_active_mask);
-		prev_op = 1;
+		
+		if (!(running_composite_mask & m_stack.at(i).m_active_mask).any()){
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			fragment_mask.push_back(m_stack.at(i).m_active_mask);
+			prev_op = 1;
+			//update mask
+			running_composite_mask |= m_stack.at(i).m_active_mask;
+		}
 	  }   
     }
 	
@@ -775,6 +794,9 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
       assert(!(composite_mask & fragment_mask.at(j)).any());
       composite_mask |= fragment_mask.at(j);
     }
+	
+	//running mask and final mask should be the same
+	assert(running_composite_mask == composite_mask);
 	
     return m_fragment_entries;
 }
