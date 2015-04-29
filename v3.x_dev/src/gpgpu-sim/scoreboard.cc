@@ -48,32 +48,86 @@ void Scoreboard::printContents() const
 	for(unsigned i=0; i<reg_table.size(); i++) {
 		if(reg_table[i].size() == 0 ) continue;
 		printf("  wid = %2d: ", i);
-		std::set<unsigned>::const_iterator it;
-		for( it=reg_table[i].begin() ; it != reg_table[i].end(); it++ )
-			printf("%u ", *it);
+		std::deque<reg_and_mask>::const_iterator it;
+		for( it=reg_table[i].begin() ; it != reg_table[i].end(); it++ ){
+			printf("%u (", it->reg);
+			for (unsigned j=0; j<it->active_mask.size(); j++){
+				printf("%c", (it->active_mask.test(j)?'1':'0') );
+			}
+			printf(") ");
+			
+		}
 		printf("\n");
 	}
 }
 
-void Scoreboard::reserveRegister(unsigned wid, unsigned regnum) 
+void Scoreboard::reserveRegister(unsigned wid, unsigned regnum, const active_mask_t & active_mask) 
 {
-	if( !(reg_table[wid].find(regnum) == reg_table[wid].end()) ){
-		printf("Error: trying to reserve an already reserved register (sid=%d, wid=%d, regnum=%d).", m_sid, wid, regnum);
-        abort();
+	unsigned reserved = 0;
+	for (std::deque<reg_and_mask>::iterator it=reg_table[wid].begin(); it!=reg_table[wid].end(); ++it)
+	{
+		if (it->reg == regnum){
+			if ((it->active_mask & active_mask).any()){
+				printf("Error: trying to reserve an already reserved register (sid=%d, wid=%d, regnum=%d).", m_sid, wid, regnum);
+				abort();
+			}
+			else{
+				SHADER_DPRINTF( SCOREBOARD,
+                    "Updating mask - warp:%d, reg: %d\n", wid, regnum );
+				
+				it->active_mask |= active_mask;
+
+				reserved = 1;
+			}
+		}
 	}
+	
     SHADER_DPRINTF( SCOREBOARD,
                     "Reserved Register - warp:%d, reg: %d\n", wid, regnum );
-	reg_table[wid].insert(regnum);
+	reg_and_mask new_entry;
+	new_entry.reg = regnum;
+	new_entry.active_mask = active_mask;
+	//reserve new entry
+	if (reserved == 0){
+		reg_table[wid].push_back(new_entry);
+	}
 }
 
 // Unmark register as write-pending
-void Scoreboard::releaseRegister(unsigned wid, unsigned regnum) 
+void Scoreboard::releaseRegister(unsigned wid, unsigned regnum, const active_mask_t & active_mask) 
 {
-	if( !(reg_table[wid].find(regnum) != reg_table[wid].end()) ) 
-        return;
-    SHADER_DPRINTF( SCOREBOARD,
+	if (reg_table[wid].size() == 0)
+		return;
+	
+	for (std::deque<reg_and_mask>::iterator it=reg_table[wid].begin(); it!=reg_table[wid].end(); ++it)
+	{
+		if (it->reg == regnum){
+			
+			//Sanity check
+			for (unsigned i = 0; i < active_mask.size(); i++){
+				//if we're resetting a lane that was never set
+				if (active_mask[i] && !it->active_mask[i]){
+					printf("Error: trying to reset lanes that were never reserved (sid=%d, wid=%d, regnum=%d).\n", m_sid, wid, regnum);
+					abort();		
+				}
+			}
+			
+			SHADER_DPRINTF( SCOREBOARD,
                     "Release register - warp:%d, reg: %d\n", wid, regnum );
-	reg_table[wid].erase(regnum);
+			
+			//otherwise remove the mask	
+			it->active_mask &= ~active_mask;
+			//remove entry entirely if nothing is left
+			if (it->active_mask.none()){
+				reg_table[wid].erase(it);
+			}
+			
+			break;
+		}
+	}
+	
+	//baseline was that if we didn't find it we just returned, so we respect it here as well
+
 }
 
 const bool Scoreboard::islongop (unsigned warp_id,unsigned regnum) {
@@ -84,7 +138,7 @@ void Scoreboard::reserveRegisters(const class warp_inst_t* inst)
 {
     for( unsigned r=0; r < 4; r++) {
         if(inst->out[r] > 0) {
-            reserveRegister(inst->warp_id(), inst->out[r]);
+            reserveRegister(inst->warp_id(), inst->out[r], inst->get_active_mask());
             SHADER_DPRINTF( SCOREBOARD,
                             "Reserved register - warp:%d, reg: %d\n",
                             inst->warp_id(),
@@ -121,7 +175,7 @@ void Scoreboard::releaseRegisters(const class warp_inst_t *inst)
                             "Register Released - warp:%d, reg: %d\n",
                             inst->warp_id(),
                             inst->out[r] );
-            releaseRegister(inst->warp_id(), inst->out[r]);
+            releaseRegister(inst->warp_id(), inst->out[r], inst->get_active_mask());
             longopregs[inst->warp_id()].erase(inst->out[r]);
         }
     }
@@ -133,10 +187,10 @@ void Scoreboard::releaseRegisters(const class warp_inst_t *inst)
  * @return 
  * true if WAW or RAW hazard (no WAR since in-order issue)
  **/ 
-bool Scoreboard::checkCollision( unsigned wid, const class inst_t *inst ) const
+bool Scoreboard::checkCollision( unsigned wid, const class inst_t *inst, const active_mask_t &active_mask ) const
 {
 	// Get list of all input and output registers
-	std::set<int> inst_regs;
+	std::set<unsigned> inst_regs;
 
 	if(inst->out[0] > 0) inst_regs.insert(inst->out[0]);
 	if(inst->out[1] > 0) inst_regs.insert(inst->out[1]);
@@ -151,11 +205,23 @@ bool Scoreboard::checkCollision( unsigned wid, const class inst_t *inst ) const
 	if(inst->ar2 > 0) inst_regs.insert(inst->ar2);
 
 	// Check for collision, get the intersection of reserved registers and instruction registers
-	std::set<int>::const_iterator it2;
-	for ( it2=inst_regs.begin() ; it2 != inst_regs.end(); it2++ )
-		if(reg_table[wid].find(*it2) != reg_table[wid].end()) {
-			return true;
+	std::set<unsigned>::const_iterator it2;
+	for ( it2=inst_regs.begin() ; it2 != inst_regs.end(); it2++ ){
+		for (std::deque<reg_and_mask>::const_iterator it=reg_table[wid].begin(); it!=reg_table[wid].end(); ++it)
+		{
+			/*if (it->reg == *it2){
+				return true;
+			}*/
+			//only collides when masks intersect
+			if (it->reg == *it2){
+				if ((it->active_mask & active_mask).any()){
+					return true;
+				}
+				//otherwise there's no collision
+				return false;
+			}
 		}
+	}
 	return false;
 }
 

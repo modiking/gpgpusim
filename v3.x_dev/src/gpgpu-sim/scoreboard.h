@@ -36,27 +36,33 @@
 
 #include "../abstract_hardware_model.h"
 
+
 class Scoreboard {
 public:
     Scoreboard( unsigned sid, unsigned n_warps );
 
     void reserveRegisters(const warp_inst_t *inst);
     void releaseRegisters(const warp_inst_t *inst);
-    void releaseRegister(unsigned wid, unsigned regnum);
+    void releaseRegister(unsigned wid, unsigned regnum, const active_mask_t & active_mask);
 
-    bool checkCollision(unsigned wid, const inst_t *inst) const;
+    bool checkCollision(unsigned wid, const inst_t *inst, const active_mask_t & active_mask) const;
     bool pendingWrites(unsigned wid) const;
     void printContents() const;
     const bool islongop(unsigned warp_id, unsigned regnum);
 private:
-    void reserveRegister(unsigned wid, unsigned regnum);
+    void reserveRegister(unsigned wid, unsigned regnum, const active_mask_t & active_mask);
     int get_sid() const { return m_sid; }
 
     unsigned m_sid;
+	
+	struct reg_and_mask{
+		unsigned reg;
+		active_mask_t active_mask;
+	};
 
     // keeps track of pending writes to registers
     // indexed by warp id, reg_id => pending write count
-    std::vector< std::set<unsigned> > reg_table;
+    std::vector< std::deque<reg_and_mask> > reg_table;
     //Register that depend on a long operation (global, local or tex memory)
     std::vector< std::set<unsigned> > longopregs;
 };

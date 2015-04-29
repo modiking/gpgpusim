@@ -1073,6 +1073,56 @@ public:
 		}
 		return false;
 	}
+	
+	struct warp_id_cycle_pairs {
+	  unsigned warp_id;
+	  unsigned long long issue_cycle;
+	};
+	
+	//Used to return the total number of unique <warp_id,issue_cycles> in the
+	//register set
+	std::deque<warp_id_cycle_pairs>  get_uniq_warps(){
+		
+		std::deque<warp_id_cycle_pairs> uniq_warp_cycles;
+		std::deque<unsigned> uniq_warps;
+		warp_id_cycle_pairs new_entry;
+		
+		uniq_warp_cycles.clear();
+		uniq_warps.clear();
+		
+		for( unsigned i = 0; i < regs.size(); i++ ) {
+			if( not regs[i]->empty() ) {
+				unsigned warp_id = regs[i]->warp_id();
+				unsigned long long issue_cycle = regs[i]->grab_issue_cycle();
+				unsigned in_queue = 0;
+				
+				
+				//check if already in queue or not
+				for (std::deque<warp_id_cycle_pairs>::iterator it = uniq_warp_cycles.begin(); it != uniq_warp_cycles.end(); it++){
+					if ((it->warp_id == warp_id) && (it->issue_cycle == issue_cycle)){
+						in_queue = 1;
+						break;
+					}
+				}
+				
+				//add to queue if not in
+				if (in_queue == 0){
+					new_entry.warp_id = warp_id;
+					new_entry.issue_cycle = issue_cycle;
+					uniq_warp_cycles.push_back(new_entry);
+				}
+			}
+		}
+		
+		return uniq_warp_cycles;
+		
+		/*for (std::deque<warp_id_cycle_pairs>::iterator it = uniq_warp_cycles.begin(); it != uniq_warp_cycles.end(); it++){
+			uniq_warps.push_back(it->warp_id);
+		}
+		
+		return uniq_warps;
+		*/
+	}
 
 	void move_in( warp_inst_t *&src ){
 		warp_inst_t** free = get_free();

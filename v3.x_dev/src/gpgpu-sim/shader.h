@@ -200,6 +200,24 @@ public:
 
     }
 	
+	int ibuffer_valid_entries(){
+		
+		int count = 0;
+		
+		for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
+        {
+            for( unsigned i=0; i < IBUFFER_SIZE; i++)
+            { 
+                if(m_ibuffer[j][i].m_valid){
+                    count++;
+					break;
+				}
+            }
+        }
+
+        return count;
+	}
+	
 
     //NEW, ibuffer_frag_empty
     //checks through the entire ibuffer to see if it is empty
@@ -444,6 +462,10 @@ public:
     // all the derived schedulers.  The scheduler's behaviour can be
     // modified by changing the contents of the m_next_cycle_prioritized_warps list.
     void cycle();
+	
+	// Additional step to check issue and allow multiple fragments from the same
+	// warp on the same cycle through
+	int check_issue(register_set* pipeline, int max, unsigned warp_id);
 
     // These are some common ordering fucntions that the
     // higher order schedulers can take advantage of
