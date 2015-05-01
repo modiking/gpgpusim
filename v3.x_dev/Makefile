@@ -183,8 +183,8 @@ cudalib: makedirs cuda-sim
 
 ifneq ($(GPGPUSIM_POWER_MODEL),)
 mcpat: makedirs
-	$(MAKE) -C $(GPGPUSIM_POWER_MODEL) depend
-	$(MAKE) -C $(GPGPUSIM_POWER_MODEL) $(MCPAT_DBG_FLAG)
+	#$(MAKE) -C $(GPGPUSIM_POWER_MODEL) depend
+	#$(MAKE) -C $(GPGPUSIM_POWER_MODEL) $(MCPAT_DBG_FLAG)
 endif
 
 cuda-sim: makedirs
@@ -222,7 +222,7 @@ makedirs:
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/$(INTERSIM) ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/$(INTERSIM); fi;
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/cuobjdump_to_ptxplus ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/cuobjdump_to_ptxplus; fi;
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/gpuwattch ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/gpuwattch; fi;
-	if [ ! -d $(SIM_OBJ_FILES_DIR)/gpuwattch/cacti ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/gpuwattch/cacti; fi;
+	#if [ ! -d $(SIM_OBJ_FILES_DIR)/gpuwattch/cacti ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/gpuwattch/cacti; fi;
 
 all:
 	$(MAKE) gpgpusim

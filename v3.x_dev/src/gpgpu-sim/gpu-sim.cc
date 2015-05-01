@@ -363,6 +363,14 @@ void shader_core_config::reg_options(class OptionParser * opp)
                                 "For complete list of prioritization values see shader.h enum scheduler_prioritization_type"
                                 "Default: gto",
                                  "gto");
+								 
+	option_parser_register(opp, "-gpgpu_imiss_check", OPT_INT32, &gpgpu_imiss_check,
+                            "Enables checking for outstanding imiss requests when issuing warps, 1 causes checks and 0 skips them",
+                             "0");
+							 
+	option_parser_register(opp, "-gpgpu_oc_broadcast", OPT_INT32, &gpgpu_oc_broadcast,
+                            "Enables OC broadcasting, very experimental implementation",
+                             "0");						 
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)

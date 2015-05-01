@@ -79,6 +79,9 @@
 //NEW, pulled definition from inside of the warp_t object
 #define IBUFFER_SIZE 2
 
+//NEW, define number of warps/CTAs available to execute at a time
+#define MAX_WARP_IN_CONTEXT 32
+
 class thread_ctx_t {
 public:
    unsigned m_cta_id; // hardware CTA this thread belongs
@@ -359,6 +362,8 @@ public:
 
     unsigned get_dynamic_warp_id() const { return m_dynamic_warp_id; }
     unsigned get_warp_id() const { return m_warp_id; }
+	
+	shader_core_ctx * get_shader() {return m_shader; }
 
 private:
     class shader_core_ctx *m_shader;
@@ -434,6 +439,7 @@ enum concrete_scheduler
     CONCRETE_SCHEDULER_GTO,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
+	CONCRETE_SCHEDULER_FRAG_SCHED,
     NUM_CONCRETE_SCHEDULERS
 };
 
@@ -465,7 +471,7 @@ public:
 	
 	// Additional step to check issue and allow multiple fragments from the same
 	// warp on the same cycle through
-	int check_issue(register_set* pipeline, int max, unsigned warp_id);
+	static int check_issue(register_set* pipeline, int max, unsigned warp_id);
 
     // These are some common ordering fucntions that the
     // higher order schedulers can take advantage of
@@ -493,7 +499,13 @@ public:
                             OrderingType age_ordering,
                             bool (*priority_func)(U lhs, U rhs) );
     static bool sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t* rhs);
-
+	
+	//New sorting priority function, sorts based off of # of lanes 
+	static bool sort_warps_by_utilization(shd_warp_t* lhs, shd_warp_t* rhs);
+	
+	//function to determine how many lanes can be executed
+	static unsigned get_executable_lanes(shd_warp_t* lhs);
+	unsigned get_exec_lanes(shd_warp_t* lhs);
     // Derived classes can override this function to populate
     // m_supervised_warps with their scheduling policies
     virtual void order_warps() = 0;
@@ -558,6 +570,25 @@ public:
                     int id )
     : scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
     virtual ~gto_scheduler () {}
+    virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+    }
+
+};
+
+//Very similar to GTO, but with differing order_warps
+class fragment_scheduler : public scheduler_unit {
+public:
+    fragment_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+                    register_set* sfu_out,
+                    register_set* mem_out,
+                    int id )
+    : scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, sfu_out, mem_out, id ){}
+    virtual ~fragment_scheduler () {}
     virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
@@ -659,10 +690,13 @@ public:
 
    void step()
    {
+	    //sends ready CUs to execution
         dispatch_ready_cu();   
+		//go through register file, and grab non-conflicting read data
         allocate_reads();
         for( unsigned p = 0 ; p < m_in_ports.size(); p++ ) 
             allocate_cu( p );
+		//reset register file so its fresh for next run
         process_banks();
    }
 
@@ -689,6 +723,9 @@ private:
    void dispatch_ready_cu();
    void allocate_cu( unsigned port );
    void allocate_reads();
+   
+   //broadcasts register file requests across all OCs
+   void broadcast_across_collectors(unsigned warp_id, unsigned long long issue_cycle, unsigned operand, unsigned cu, unsigned bank);
 
    // types
 
@@ -804,6 +841,14 @@ private:
 
    class arbiter_t {
    public:
+   
+	  struct queue_entry{
+		  op_t op;
+		  unsigned warp_id;
+		  unsigned long long cycle_issued;
+		  collector_unit_t * cu_ptr;
+	  };
+   
       // constructors
       arbiter_t()
       {
@@ -826,7 +871,7 @@ private:
          _request = new int*[ m_num_banks ];
          for(unsigned i=0; i<m_num_banks;i++) 
              _request[i] = new int[m_num_collectors];
-         m_queue = new std::list<op_t>[num_banks];
+         m_queue = new std::list<queue_entry>[num_banks];
          m_allocated_bank = new allocation_t[num_banks];
          m_allocator_rr_head = new unsigned[num_cu];
          for( unsigned n=0; n<num_cu;n++ ) 
@@ -842,9 +887,9 @@ private:
          fprintf(fp,"  requests:\n");
          for( unsigned b=0; b<m_num_banks; b++ ) {
             fprintf(fp,"    bank %u : ", b );
-            std::list<op_t>::const_iterator o = m_queue[b].begin();
+            std::list<queue_entry>::const_iterator o = m_queue[b].begin();
             for(; o != m_queue[b].end(); o++ ) {
-               o->dump(fp);
+               (*o).op.dump(fp);
             }
             fprintf(fp,"\n");
          }
@@ -866,10 +911,53 @@ private:
             const op_t &op = src[i];
             if( op.valid() ) {
                unsigned bank = op.get_bank();
-               m_queue[bank].push_back(op);
+			   unsigned warp_id = cu->get_warp_id();
+			   unsigned long long issue_cycle = cu->get_warp()->grab_issue_cycle();
+			   collector_unit_t * cu_ptr = cu;
+			   queue_entry new_entry;
+			   new_entry.op = op;
+			   new_entry.warp_id = warp_id;
+			   new_entry.cycle_issued = issue_cycle;
+			   new_entry.cu_ptr = cu_ptr;
+			   
+               m_queue[bank].push_back(new_entry);
             }
          }
       }
+	  
+	  //remove duplicate requests served due to broadcast
+	  void remove_requests(unsigned warp_id, unsigned long long issue_cycle, unsigned reg, unsigned bank, unsigned oc_id){
+		  std::list<queue_entry>::iterator o = m_queue[bank].begin();
+          while(o != m_queue[bank].end()) {
+			  
+             //find outstanding request from same fragment issue
+			 if (((*o).warp_id == warp_id) && ((*o).cycle_issued == issue_cycle)){
+				 //check if the request is for the same register
+				 unsigned operand = (*o).op.get_operand();
+				 
+				 //again, do not remove requests from the same CU
+				 if (((*o).cu_ptr->get_operands())[operand].get_oc_id() == oc_id){
+					 ++o;
+					 continue;
+				 }
+				
+				 //find out what register this operand was keyed too, compare
+				 //with the register currently requested
+				 if(((*o).cu_ptr->get_operands())[operand].get_reg() == reg){
+					 //clear
+					 //printf("Request cleared CU %u reg %u %u\n", ((*o).cu_ptr->get_operands())[operand].get_oc_id(), ((*o).cu_ptr->get_operands())[operand].get_reg(), reg);
+					 //erase and update iterator to next
+					 o = m_queue[bank].erase(o);
+					 continue;
+				 }
+			 }
+			 
+			 ++o;
+          }
+		  
+	  }
+	  
+	  
       bool bank_idle( unsigned bank ) const
       {
           return m_allocated_bank[bank].is_free();
@@ -895,8 +983,7 @@ private:
       unsigned m_num_collectors;
 
       allocation_t *m_allocated_bank; // bank # -> register that wins
-      std::list<op_t> *m_queue;
-
+      std::list<queue_entry> *m_queue;
       unsigned *m_allocator_rr_head; // cu # -> next bank to check for request (rr-arb)
       unsigned  m_last_cu; // first cu to check while arb-ing banks (rr)
 
@@ -931,6 +1018,7 @@ private:
          m_warp_id = -1;
          m_num_banks = 0;
          m_bank_warp_shift = 0;
+		 m_collector_type = 0;
       }
       // accessors
       bool ready() const;
@@ -942,6 +1030,8 @@ private:
       const active_mask_t & get_active_mask() const { return m_warp->get_active_mask(); }
       unsigned get_sp_op() const { return m_warp->sp_op; }
       unsigned get_id() const { return m_cuid; } // returns CU hw id
+	  
+	  warp_inst_t * get_warp() const { return m_warp; }
 
       // modifiers
       void init(unsigned n, 
@@ -963,6 +1053,21 @@ private:
       }
       void dispatch();
       bool is_free(){return m_free;}
+	  
+	  //new, determines whether a register is needed or not
+	  bool reg_needed(unsigned reg, unsigned * operand){
+		  for( unsigned i=0; i < MAX_REG_OPERANDS*2; i++ ) {
+			 if( m_not_ready.test(i) ) {
+				unsigned r = m_src_op[i].get_reg();
+				if (r == reg){
+					*operand = i;
+					return true;
+				}
+			 }
+		  }
+		  
+		  return false;
+	  }
 
    private:
       bool m_free;
@@ -975,6 +1080,9 @@ private:
       unsigned m_num_banks;
       unsigned m_bank_warp_shift;
       opndcoll_rfu_t *m_rfu;
+	  
+	     //stores the type of collector you are
+      unsigned m_collector_type;
 
    };
 
@@ -1482,6 +1590,10 @@ struct shader_core_config : public core_config
     int simt_core_sim_order; 
     
     unsigned mem2device(unsigned memid) const { return memid + n_simt_clusters; }
+	
+	//new option
+	int gpgpu_imiss_check;
+	int gpgpu_oc_broadcast;
 };
 
 struct shader_core_stats_pod {
@@ -1725,7 +1837,10 @@ public:
                      shader_core_stats *stats );
 
 //NEW, used for checking whether a warp is exiting
-    bool check_done_exit(unsigned warp_id);					 
+    bool check_done_exit(unsigned warp_id);		
+
+    //op collector configuration
+    enum { SP_CUS, SFU_CUS, MEM_CUS, GEN_CUS };	
 					 
 // used by simt_core_cluster:
     // modifiers
@@ -1807,6 +1922,7 @@ public:
     // accessors
     virtual bool warp_waiting_at_barrier( unsigned warp_id ) const;
     void get_pdom_stack_top_info( unsigned tid, unsigned *pc, unsigned *rpc ) const;
+	scheduler_unit* get_scheduler(){ return schedulers[0]; }
 
 // used by pipeline timing model components:
     // modifiers

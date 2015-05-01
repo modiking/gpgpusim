@@ -130,3 +130,5 @@ fi
 echo "setup_environment succeeded";
 
 export GPGPUSIM_SETUP_ENVIRONMENT_WAS_RUN=1
+
+#export GPGPUSIM_POWER_MODEL=;

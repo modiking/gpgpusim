@@ -217,11 +217,11 @@ bool Scoreboard::checkCollision( unsigned wid, const class inst_t *inst, const a
 				if ((it->active_mask & active_mask).any()){
 					return true;
 				}
-				//otherwise there's no collision
-				return false;
+				//otherwise have to check other registers
 			}
 		}
 	}
+	//none of the registers triggering 
 	return false;
 }
 
