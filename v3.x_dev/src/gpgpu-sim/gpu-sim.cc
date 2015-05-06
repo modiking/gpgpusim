@@ -370,7 +370,18 @@ void shader_core_config::reg_options(class OptionParser * opp)
 							 
 	option_parser_register(opp, "-gpgpu_oc_broadcast", OPT_INT32, &gpgpu_oc_broadcast,
                             "Enables OC broadcasting, very experimental implementation",
-                             "0");						 
+                             "0");	
+
+	option_parser_register(opp, "-gpgpu_oc_wait_all", OPT_INT32, &gpgpu_oc_wait_all,
+                            "Make the OC wait for every fragment before issuing, or let it go as it gets registers",
+                             "0");	
+							 
+	option_parser_register(opp, "-gpgpu_frag_scoreboard_check", OPT_INT32, 
+							&gpgpu_frag_scoreboard_check,
+                            "Prevent a warp from issuing if there's a single scoreboard conflict within any of its fragments",
+                             "0");							 
+							 
+							 
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)

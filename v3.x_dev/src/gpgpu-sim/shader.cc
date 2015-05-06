@@ -1084,7 +1084,7 @@ void scheduler_unit::order_by_priority( std::vector< T >& result_list,
     }
 }
 
-int scheduler_unit::check_issue(register_set* pipeline, int max, unsigned warp_id){
+int scheduler_unit::check_issue(register_set* pipeline, int max, unsigned warp_id, unsigned long long issue_time){
 
 	//to emulate multiple fragments but same # of warps
 	//we only issue if:
@@ -1108,7 +1108,7 @@ int scheduler_unit::check_issue(register_set* pipeline, int max, unsigned warp_i
 	unsigned already_issued = 0;
 	for (std::deque<register_set::warp_id_cycle_pairs>::iterator it = uniq_warp_cycles.begin(); it != uniq_warp_cycles.end(); it++){
 		//matching warp_id/issue_cycle indicates this is another fragment
-		if ((it->warp_id == warp_id) && (it->issue_cycle == gpu_tot_sim_cycle+gpu_sim_cycle)){
+		if ((it->warp_id == warp_id) && (it->issue_cycle == issue_time)){
 			//allow issue
 			already_issued = 1;
 			break;
@@ -1116,6 +1116,70 @@ int scheduler_unit::check_issue(register_set* pipeline, int max, unsigned warp_i
 	}
 	
 	return already_issued;
+}
+
+unsigned scheduler_unit::warp_frag_scoreboard_conflict(unsigned warp_id){
+	
+	//reset internal fragment for every warp
+	warp(warp_id).ibuffer_reset_frag();
+	
+	unsigned checked = 0;
+	
+	//Go through the whole buffer
+	//if there's nothing issued, we can test another buffer
+	while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < MAX_WARP_FRAGMENTS)) {
+		
+		checked++;
+	
+		bool valid = warp(warp_id).ibuffer_next_valid();
+		//skip over invalid buffers
+		if (!valid){
+			//move on to next ibuffer entry
+			warp(warp_id).ibuffer_next_frag();
+			continue;
+		}
+
+		const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
+		unsigned height = warp(warp_id).ibuffer_get_height();
+		//NEW, variable to track if we exceeded the stack
+		bool valid_stack_entry = true;
+
+		unsigned pc,rpc;
+		valid_stack_entry = m_simt_stack[warp_id]->iter_get_pdom_stack(height,&pc,&rpc);
+	  
+		//should still check if there's at least 1 instruction
+		if( pI ) {
+			//sanity check that the instruction is valid
+			assert(valid_stack_entry && valid);
+			
+			if( pc != pI->pc ) {
+				//branch divergence, still counts as active
+
+			} else {
+				
+				const active_mask_t &active_mask = m_simt_stack[warp_id]->iter_get_active_mask(height);
+				
+				if ( m_scoreboard->checkCollision(warp_id, pI, active_mask) ) {
+					//scoreboard conflict, prevent execution until its all cleared
+					return 1;
+				}
+				else{
+					//otherwise, the only way it can fail is if the buffers are full
+					//but we let them go anyways
+				}
+			
+			}	
+		}				
+		else if( valid ) {
+			//reconvergence, still counts as active
+		}
+		
+		//move on to the next entry
+		warp(warp_id).ibuffer_next_frag();
+	}
+			
+	return 0;
+	
 }
 
 
@@ -1167,9 +1231,9 @@ void scheduler_unit::cycle()
 	
 	//maximum # of unique warps per FU, note because gpgpusim.config is modified
 	//to support MAX_WARP_FRAGMENTS this amounts to reducing the values by this factor
-	unsigned max_sp = m_shader->m_config->pipe_widths[ID_OC_SP] / MAX_WARP_FRAGMENTS;
-	unsigned max_sfu = m_shader->m_config->pipe_widths[ID_OC_SFU] / MAX_WARP_FRAGMENTS;
-	unsigned max_mem = m_shader->m_config->pipe_widths[ID_OC_MEM] / MAX_WARP_FRAGMENTS;
+	unsigned max_sp = m_shader->m_config->gpgpu_operand_collector_num_in_ports_sp / MAX_WARP_FRAGMENTS;
+	unsigned max_sfu = m_shader->m_config->gpgpu_operand_collector_num_in_ports_sfu / MAX_WARP_FRAGMENTS;
+	unsigned max_mem = m_shader->m_config->gpgpu_operand_collector_num_in_ports_mem / MAX_WARP_FRAGMENTS;
 	
     for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
           iter != m_next_cycle_prioritized_warps.end();
@@ -1194,6 +1258,14 @@ void scheduler_unit::cycle()
 			}
 		}
 		
+		//if a warp has outstanding scoreboard misses, we should also skip
+		if (m_shader->m_config->gpgpu_frag_scoreboard_check){
+			if (warp_frag_scoreboard_conflict(warp_id)){
+				//has conflict, move forward
+				continue;
+			}	
+		}
+		
         SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
                        (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
 
@@ -1210,8 +1282,10 @@ void scheduler_unit::cycle()
 		//if there's nothing issued, we can test another buffer
 		while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < MAX_WARP_FRAGMENTS)) {
 
-			if (warp(warp_id).ibuffer_valid_entries() == 4){
-				printf("Shader %d Cycle %Lu, Warp %u has %d fragments\n", m_shader->m_sid,  gpu_tot_sim_cycle+gpu_sim_cycle, warp_id, warp(warp_id).ibuffer_valid_entries());
+			if (SCHEDULE_PRINT){
+				if (warp(warp_id).ibuffer_valid_entries() == 4){
+					printf("Shader %d Cycle %Lu, Warp %u has %d fragments\n", m_shader->m_sid,  gpu_tot_sim_cycle+gpu_sim_cycle, warp_id, warp(warp_id).ibuffer_valid_entries());
+				}
 			}
 			
 			checked++;
@@ -1275,7 +1349,7 @@ void scheduler_unit::cycle()
 						//MEMORY INSTRUCTION
 						if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) {
 							
-							int issue_allowed = check_issue(m_mem_out, max_mem, warp_id);
+							int issue_allowed = check_issue(m_mem_out, max_mem, warp_id, gpu_tot_sim_cycle+gpu_sim_cycle);
 
 							if(issue_allowed && m_mem_out->has_free() ) {
 								m_shader->issue_warp(height, *m_mem_out,pI,active_mask,warp_id, active_lane_count);
@@ -1296,8 +1370,8 @@ void scheduler_unit::cycle()
 								printf("Cycle %Lu Unique Warps: Warp_id = %d Issue = %Lu\n", gpu_tot_sim_cycle+gpu_sim_cycle, it->warp_id, it->issue_cycle);
 							}
 							*/
-							int issue_allowed_sp = check_issue(m_sp_out, max_sp, warp_id);
-							int issue_allowed_sfu = check_issue(m_sfu_out, max_sfu, warp_id);
+							int issue_allowed_sp = check_issue(m_sp_out, max_sp, warp_id, gpu_tot_sim_cycle+gpu_sim_cycle);
+							int issue_allowed_sfu = check_issue(m_sfu_out, max_sfu, warp_id, gpu_tot_sim_cycle+gpu_sim_cycle);
 	
 							bool sp_pipe_avail = m_sp_out->has_free();
 							bool sfu_pipe_avail = m_sfu_out->has_free();
@@ -1414,10 +1488,9 @@ bool scheduler_unit::sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t
 
 unsigned scheduler_unit::get_exec_lanes(shd_warp_t* lhs){
 
-
-	unsigned max_sp = m_shader->m_config->pipe_widths[ID_OC_SP] / MAX_WARP_FRAGMENTS;
-	unsigned max_sfu = m_shader->m_config->pipe_widths[ID_OC_SFU] / MAX_WARP_FRAGMENTS;
-	unsigned max_mem = m_shader->m_config->pipe_widths[ID_OC_MEM] / MAX_WARP_FRAGMENTS;
+	unsigned max_sp = m_shader->m_config->gpgpu_operand_collector_num_in_ports_sp / MAX_WARP_FRAGMENTS;
+	unsigned max_sfu = m_shader->m_config->gpgpu_operand_collector_num_in_ports_sfu / MAX_WARP_FRAGMENTS;
+	unsigned max_mem = m_shader->m_config->gpgpu_operand_collector_num_in_ports_mem / MAX_WARP_FRAGMENTS;
 	
 	unsigned checked = 0;
 	
@@ -1471,15 +1544,17 @@ unsigned scheduler_unit::get_exec_lanes(shd_warp_t* lhs){
 					//MEMORY INSTRUCTION
 					if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) {
 						
-						int issue_allowed = check_issue(m_mem_out, max_mem, warp_id);
+						//the -1 is because we're only checking if it can be issued
+						//basically, it cannot be a part of a previous warp
+						int issue_allowed = check_issue(m_mem_out, max_mem, warp_id, -1);
 
 						if(issue_allowed && m_mem_out->has_free() ) {
 							lanes_active += active_mask.count();
 						}
 
 					} else {
-						int issue_allowed_sp = check_issue(m_sp_out, max_sp, warp_id);
-						int issue_allowed_sfu = check_issue(m_sfu_out, max_sfu, warp_id);
+						int issue_allowed_sp = check_issue(m_sp_out, max_sp, warp_id, -1);
+						int issue_allowed_sfu = check_issue(m_sfu_out, max_sfu, warp_id, -1);
 
 						bool sp_pipe_avail = m_sp_out->has_free();
 						bool sfu_pipe_avail = m_sfu_out->has_free();
@@ -1495,108 +1570,18 @@ unsigned scheduler_unit::get_exec_lanes(shd_warp_t* lhs){
 				}
 			}
 		}
+		//since there's no stack actually associated with this
+		//we just let it be, this does mean that we favor warps that are not reconverging 
+		else if( valid ) {
+			//reconvergence, but still count as execution
+			//lanes_active += active_mask.count();
+			
+		}
 		//move on to next ibuffer entry
 		lhs->ibuffer_next_frag();	
 	}
 	
 	return lanes_active;
-}
-
-
-
-//Scheduler modelled to maintain a list of highest utilization warps
-//which is updated every scoreboard/memory change 
-
-unsigned scheduler_unit::get_executable_lanes(shd_warp_t* lhs){
-	
-	unsigned max_sp = lhs->get_shader()->m_config->pipe_widths[0] / MAX_WARP_FRAGMENTS;
-	unsigned max_sfu = lhs->get_shader()->m_config->pipe_widths[1] / MAX_WARP_FRAGMENTS;
-	unsigned max_mem = lhs->get_shader()->m_config->pipe_widths[2] / MAX_WARP_FRAGMENTS;
-	
-	unsigned checked = 0;
-	
-	//temporary storage for active lane count
-	unsigned lanes_active = 0;
-	
-	unsigned warp_id = lhs->get_warp_id();
-	
-	shader_core_ctx * m_shader = lhs->get_shader();
-	
-	while( !lhs->waiting() && !lhs->ibuffer_frag_empty() && (checked < MAX_WARP_FRAGMENTS)) {
-			
-		checked++;
-		
-		bool valid = lhs->ibuffer_next_valid();
-		//skip over invalid buffers
-		if (!valid){
-			//move on to next ibuffer entry
-			lhs->ibuffer_next_frag();
-			continue;
-		}
-
-		const warp_inst_t *pI = lhs->ibuffer_next_inst();
-		unsigned height = lhs->ibuffer_get_height();
-
-		//NEW, variable to track if we exceeded the stack
-		bool valid_stack_entry = true;
-		
-		unsigned pc,rpc;
-		valid_stack_entry = m_shader->m_simt_stack[warp_id]->iter_get_pdom_stack(height,&pc,&rpc);
-	  
-		//should still check if there's at least 1 instruction
-		if( pI ) {
-			//sanity check that the instruction is valid
-			assert(valid_stack_entry && valid);
-			
-			if( pc != pI->pc ) {
-				//no lanes executing
-				continue;
-			} else {
-
-				const active_mask_t &active_mask = m_shader->m_simt_stack[warp_id]->iter_get_active_mask(height);
-				
-				if ( !m_shader->m_scoreboard->checkCollision(warp_id, pI, active_mask) ) {
-					
-					//NO SCOREBOARD CONFLICTS
-					assert( lhs->inst_in_pipeline() );
-
-					//MEMORY INSTRUCTION
-					if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) {
-						
-						int issue_allowed = check_issue(&m_shader->m_pipeline_reg[ID_OC_MEM], max_mem, warp_id);
-
-						if(issue_allowed && m_shader->m_pipeline_reg[ID_OC_MEM].has_free() ) {
-							lanes_active += active_mask.count();
-						}
-
-					} else {
-					//COMPUTATION INSTRUCTION
-						int issue_allowed_sp = check_issue(&m_shader->m_pipeline_reg[ID_OC_SP], max_sp, warp_id);
-						int issue_allowed_sfu = check_issue(&m_shader->m_pipeline_reg[ID_OC_SFU], max_sfu, warp_id);
-
-						bool sp_pipe_avail = m_shader->m_pipeline_reg[ID_OC_SP].has_free();
-						bool sfu_pipe_avail = m_shader->m_pipeline_reg[ID_OC_SFU].has_free();
-						if( issue_allowed_sp && sp_pipe_avail && (pI->op != SFU_OP) ) {
-							// always prefer SP pipe for operations that can use both SP and SFU pipelines
-							lanes_active += active_mask.count();
-						} else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
-							if(issue_allowed_sfu && sfu_pipe_avail ) {
-								lanes_active += active_mask.count();
-							}
-						} 
-					}
-				}
-			}
-		}
-		
-		//move on to next ibuffer entry
-		lhs->ibuffer_next_frag();	
-	}
-	
-	assert(lanes_active <= m_shader->m_config->warp_size);
-	
-	return lanes_active;
-	
 }
 
 //sorts by largest number of executable active lanes
@@ -3547,7 +3532,7 @@ void shd_warp_t::print_ibuffer( FILE *fout ) const
 void opndcoll_rfu_t::add_cu_set(unsigned set_id, unsigned num_cu, unsigned num_dispatch){
     m_cus[set_id].reserve(num_cu); //this is necessary to stop pointers in m_cu from being invalid do to a resize;
     for (unsigned i = 0; i < num_cu; i++) {
-        m_cus[set_id].push_back(collector_unit_t());
+        m_cus[set_id].push_back(collector_unit_t(set_id));
         m_cu.push_back(&m_cus[set_id].back());
     }
     // for now each collector set gets dedicated dispatch units.
@@ -3638,125 +3623,182 @@ void opndcoll_rfu_t::dispatch_ready_cu()
       dispatch_unit_t &du = m_dispatch_units[p];
 	  //find_ready() returns a collector unit that is ready to dispatch
       collector_unit_t *cu = du.find_ready();
-      if( cu ) {
-    	 for(unsigned i=0;i<(cu->get_num_operands()-cu->get_num_regs());i++){
-   	      if(m_shader->get_config()->gpgpu_clock_gated_reg_file){
-   	    	  unsigned active_count=0;
-   	    	  for(unsigned i=0;i<m_shader->get_config()->warp_size;i=i+m_shader->get_config()->n_regfile_gating_group){
-   	    		  for(unsigned j=0;j<m_shader->get_config()->n_regfile_gating_group;j++){
-   	    			  if(cu->get_active_mask().test(i+j)){
-   	    				  active_count+=m_shader->get_config()->n_regfile_gating_group;
-   	    				  break;
-   	    			  }
-   	    		  }
-   	    	  }
-   	    	  m_shader->incnon_rf_operands(active_count);
-   	      }else{
-    		 m_shader->incnon_rf_operands(m_shader->get_config()->warp_size);//cu->get_active_count());
-   	      }
-    	}
-		//sends to pipeline register now
-         cu->dispatch();
-      }
+	  
+	  if (cu){
+		  //because of the implementation, we can still only have a specific # of
+		  //unique warps occupied in here
+		  unsigned max_uniq_warps = 0;
+		  if (cu->get_type() == shader_core_ctx::SP_CUS){
+			  max_uniq_warps = m_shader->get_config()->pipe_widths[ID_OC_SP]/MAX_WARP_FRAGMENTS;
+		  }
+			else if  (cu->get_type() == shader_core_ctx::SFU_CUS){
+			  max_uniq_warps = m_shader->get_config()->pipe_widths[ID_OC_SFU]/MAX_WARP_FRAGMENTS;
+		  } 
+			else if  (cu->get_type() == shader_core_ctx::MEM_CUS){
+			  max_uniq_warps = m_shader->get_config()->pipe_widths[ID_OC_MEM]/MAX_WARP_FRAGMENTS;
+		  } else{
+			  printf("CU type not recognized\n");
+			  abort();
+		  }
+		  
+		  //checks if we're eligible
+		  int dispatch_allowed = scheduler_unit::check_issue(cu->get_output_reg(), max_uniq_warps, cu->get_warp_id(), cu->get_warp()->grab_issue_cycle());
+		  
+		  //option to wait for all fragments turned on
+		  if (dispatch_allowed && m_shader->get_config()->gpgpu_oc_wait_all){
+			  //search through all CUs of the same type, see if there are any that are fragments that are not ready
+			  std::vector<collector_unit_t> cu_set = *du.get_cus();
+			  
+			  for (int k = 0; k < cu_set.size(); k++){
+				  if(!cu_set[k].is_free()){
+					  warp_inst_t * test_warp = cu_set[k].get_warp();
+					  if (!test_warp->empty()){
+						  unsigned warp_id = test_warp->warp_id();
+						  unsigned long long issue_cycle = test_warp->grab_issue_cycle();
+						  
+						  //check to see if it's a fragment of the same warp
+						  if ((warp_id == cu->get_warp_id()) && (issue_cycle == cu->get_warp()->grab_issue_cycle())){
+							  //if its not ready
+							  if (!cu_set[k].ready()){
+								  //prevent dispatch
+								  dispatch_allowed = 0;
+								  break;
+							  }
+						  }
+					  }  
+				  }
+			  }
+		  }
+		  
+		  if( dispatch_allowed ) {
+			 for(unsigned i=0;i<(cu->get_num_operands()-cu->get_num_regs());i++){
+			  if(m_shader->get_config()->gpgpu_clock_gated_reg_file){
+				  unsigned active_count=0;
+				  for(unsigned i=0;i<m_shader->get_config()->warp_size;i=i+m_shader->get_config()->n_regfile_gating_group){
+					  for(unsigned j=0;j<m_shader->get_config()->n_regfile_gating_group;j++){
+						  if(cu->get_active_mask().test(i+j)){
+							  active_count+=m_shader->get_config()->n_regfile_gating_group;
+							  break;
+						  }
+					  }
+				  }
+				  m_shader->incnon_rf_operands(active_count);
+			  }else{
+				 m_shader->incnon_rf_operands(m_shader->get_config()->warp_size);
+			  }
+			}
+			//sends to pipeline register now
+			 cu->dispatch();
+		  }
+	  }
    }
 }
 
 void opndcoll_rfu_t::allocate_cu( unsigned port_num )
 {
+	
    input_port_t& inp = m_in_ports[port_num];
    for (unsigned i = 0; i < inp.m_in.size(); i++) {
        if( (*inp.m_in[i]).has_ready() ) {
           //find a free cu of the type
           for (unsigned j = 0; j < inp.m_cu_sets.size(); j++) {
               std::vector<collector_unit_t> & cu_set = m_cus[inp.m_cu_sets[j]];
-		  //because of the implementation, we can still only have a specific # of
-		  //unique warps occupied in here
-		  unsigned max_uniq_warps = 0;
-		  if (inp.m_cu_sets[j] == shader_core_ctx::SP_CUS){
-			  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_sp/MAX_WARP_FRAGMENTS;
-		  }
-			else if  (inp.m_cu_sets[j] == shader_core_ctx::SFU_CUS){
-			  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_sfu/MAX_WARP_FRAGMENTS;
-		  } 
-		  	else if  (inp.m_cu_sets[j] == shader_core_ctx::MEM_CUS){
-			  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_mem/MAX_WARP_FRAGMENTS;
-		  } 
-		  	else if  (inp.m_cu_sets[j] == shader_core_ctx::GEN_CUS){
-			  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_gen/MAX_WARP_FRAGMENTS;
-		  } else{
-			  printf("CU type not recognized\n");
-			  abort();
-		  }
-		  
-		  std::deque<register_set::warp_id_cycle_pairs> uniq_warp_cycles;
-		  
-		  //check for unique warps already in CUs
-		  for (int k = 0; k < cu_set.size(); k++){
-			  if(!cu_set[k].is_free()){
-				  warp_inst_t * test_warp = cu_set[k].get_warp();
-				  if (!test_warp->empty()){
-					  unsigned warp_id = test_warp->warp_id();
-					  unsigned long long issue_cycle = test_warp->grab_issue_cycle();
-					  
-					  unsigned in_queue = 0;
-					  
-					  register_set::warp_id_cycle_pairs new_entry;
-					  
-					  for (std::deque<register_set::warp_id_cycle_pairs>::iterator it = uniq_warp_cycles.begin(); it != uniq_warp_cycles.end(); it++){
-						  if ((it->warp_id == warp_id) && (it->issue_cycle == issue_cycle)){
-							  in_queue = 1;
-							  break;
+			  //because of the implementation, we can still only have a specific # of
+			  //unique warps occupied in here
+			  unsigned max_uniq_warps = 0;
+			  if (inp.m_cu_sets[j] == shader_core_ctx::SP_CUS){
+				  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_sp/MAX_WARP_FRAGMENTS;
+			  }
+				else if  (inp.m_cu_sets[j] == shader_core_ctx::SFU_CUS){
+				  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_sfu/MAX_WARP_FRAGMENTS;
+			  } 
+				else if  (inp.m_cu_sets[j] == shader_core_ctx::MEM_CUS){
+				  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_mem/MAX_WARP_FRAGMENTS;
+			  } 
+				else if  (inp.m_cu_sets[j] == shader_core_ctx::GEN_CUS){
+				  max_uniq_warps = m_shader->get_config()->gpgpu_operand_collector_num_units_gen/MAX_WARP_FRAGMENTS;
+			  } else{
+				  printf("CU type not recognized\n");
+				  abort();
+			  }
+			  
+			  std::deque<register_set::warp_id_cycle_pairs> uniq_warp_cycles;
+			  
+			  //check for unique warps already in CUs
+			  for (int k = 0; k < cu_set.size(); k++){
+				  if(!cu_set[k].is_free()){
+					  warp_inst_t * test_warp = cu_set[k].get_warp();
+					  if (!test_warp->empty()){
+						  unsigned warp_id = test_warp->warp_id();
+						  unsigned long long issue_cycle = test_warp->grab_issue_cycle();
+						  
+						  unsigned in_queue = 0;
+						  
+						  register_set::warp_id_cycle_pairs new_entry;
+						  
+						  for (std::deque<register_set::warp_id_cycle_pairs>::iterator it = uniq_warp_cycles.begin(); it != uniq_warp_cycles.end(); it++){
+							  if ((it->warp_id == warp_id) && (it->issue_cycle == issue_cycle)){
+								  in_queue = 1;
+								  break;
+							  }
+						  }
+						  
+						  //add if new entry
+						  if (in_queue == 0){
+							new_entry.warp_id = warp_id;
+							new_entry.issue_cycle = issue_cycle;
+							uniq_warp_cycles.push_back(new_entry);
 						  }
 					  }
 					  
-					  //add if new entry
-					  if (in_queue == 0){
-						new_entry.warp_id = warp_id;
-						new_entry.issue_cycle = issue_cycle;
-						uniq_warp_cycles.push_back(new_entry);
-					  }
 				  }
-				  
 			  }
-		  }
-		  
-		  //should not currently exceed max
-		  assert(uniq_warp_cycles.size() <= max_uniq_warps);
-		  
-		  unsigned test_warp_id;
-		  unsigned long long test_issue_cycle;
-		  unsigned allow_exec = 0;
-		  
-		  if (uniq_warp_cycles.size() < max_uniq_warps){
-			  allow_exec = 1;
-		  }
-		  
-		  warp_inst_t **pipeline_reg = inp.m_in[i]->get_ready();
-		  if( (pipeline_reg) and !((*pipeline_reg)->empty()) ) {
-			test_warp_id = (*pipeline_reg)->warp_id();
-			test_issue_cycle = (*pipeline_reg)->grab_issue_cycle();
-			
-			  //check to see if part of fragment
-			if (uniq_warp_cycles.size() == max_uniq_warps){
-			  for (std::deque<register_set::warp_id_cycle_pairs>::iterator iter = uniq_warp_cycles.begin(); iter != uniq_warp_cycles.end(); ++iter){
-					  if ((iter->warp_id == test_warp_id) && (iter->issue_cycle == test_issue_cycle)){
-						  allow_exec = 1;
-						  break;
-					  }
-			   }
-			}
-		  }
 			  
-		  if (allow_exec == 1){	  
-			  bool allocated = false;
-				  for (unsigned k = 0; k < cu_set.size(); k++) {
-					  if(cu_set[k].is_free()) {
-						 collector_unit_t *cu = &cu_set[k];
-						 allocated = cu->allocate(inp.m_in[i],inp.m_out[i]);
-						 m_arbiter.add_read_requests(cu);
-						 break;
-					  }
+			  //should not currently exceed max
+			  assert(uniq_warp_cycles.size() <= max_uniq_warps);
+			  
+			  unsigned test_warp_id;
+			  unsigned long long test_issue_cycle;
+			  unsigned allow_exec = 0;
+			  
+			  //if there's room, just issue it
+			  if (uniq_warp_cycles.size() < max_uniq_warps){
+				  allow_exec = 1;
+			  }
+			  else if (uniq_warp_cycles.size() == max_uniq_warps){
+				  //otherwise, the total number if equal and we check if its
+				  //a fragment of a warp
+				  warp_inst_t **pipeline_reg = inp.m_in[i]->get_ready();
+				  if( (pipeline_reg) and !((*pipeline_reg)->empty()) ) {
+					test_warp_id = (*pipeline_reg)->warp_id();
+					test_issue_cycle = (*pipeline_reg)->grab_issue_cycle();
+					
+					  //check to see if part of fragment
+					if (uniq_warp_cycles.size() == max_uniq_warps){
+					  for (std::deque<register_set::warp_id_cycle_pairs>::iterator iter = uniq_warp_cycles.begin(); iter != uniq_warp_cycles.end(); ++iter){
+							  if ((iter->warp_id == test_warp_id) && (iter->issue_cycle == test_issue_cycle)){
+								  allow_exec = 1;
+								  break;
+							  }
+					   }
+					}
 				  }
+			  }
+			  else{
+				  printf("Unique warps in allocating to CU exceed\n");
+				  abort();
+			  }
+				  
+			  if (allow_exec == 1){	  
+				  bool allocated = false;
+					  for (unsigned k = 0; k < cu_set.size(); k++) {
+						  if(cu_set[k].is_free()) {
+							 collector_unit_t *cu = &cu_set[k];
+							 allocated = cu->allocate(inp.m_in[i],inp.m_out[i]);
+							 m_arbiter.add_read_requests(cu);
+							 break;
+						  }
+					  }
 				  if (allocated) break; //cu has been allocated, no need to search more.
 			  }
 			  break; // can only service a single input, if it failed it will fail for others.

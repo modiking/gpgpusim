@@ -471,7 +471,10 @@ public:
 	
 	// Additional step to check issue and allow multiple fragments from the same
 	// warp on the same cycle through
-	static int check_issue(register_set* pipeline, int max, unsigned warp_id);
+	static int check_issue(register_set* pipeline, int max, unsigned warp_id, unsigned long long issue_time);
+	
+	//used to check if any of the fragments of a warp have scoreboard conflicts
+	unsigned warp_frag_scoreboard_conflict(unsigned warp_id);
 
     // These are some common ordering fucntions that the
     // higher order schedulers can take advantage of
@@ -1008,7 +1011,7 @@ private:
    class collector_unit_t {
    public:
       // constructors
-      collector_unit_t()
+      collector_unit_t(unsigned collector_type)
       { 
          m_free = true;
          m_warp = NULL;
@@ -1018,7 +1021,7 @@ private:
          m_warp_id = -1;
          m_num_banks = 0;
          m_bank_warp_shift = 0;
-		 m_collector_type = 0;
+		 m_collector_type = collector_type;
       }
       // accessors
       bool ready() const;
@@ -1068,6 +1071,9 @@ private:
 		  
 		  return false;
 	  }
+	  
+	  unsigned get_type(){return m_collector_type;}
+	  register_set* get_output_reg(){return m_output_register;}
 
    private:
       bool m_free;
@@ -1107,6 +1113,8 @@ private:
          }
          return NULL;
       }
+	  
+	  std::vector<collector_unit_t>* get_cus(){ return m_collector_units; }
 
    private:
       unsigned m_num_collectors;
@@ -1591,9 +1599,11 @@ struct shader_core_config : public core_config
     
     unsigned mem2device(unsigned memid) const { return memid + n_simt_clusters; }
 	
-	//new option
+	//new options
 	int gpgpu_imiss_check;
 	int gpgpu_oc_broadcast;
+	int gpgpu_oc_wait_all;
+	int gpgpu_frag_scoreboard_check;
 };
 
 struct shader_core_stats_pod {
