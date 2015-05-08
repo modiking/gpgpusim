@@ -701,7 +701,7 @@ bool simt_stack::iter_get_pdom_stack(unsigned height, unsigned *pc, unsigned *rp
 }
 
 //NEW function, iterate through stack and find fragments
-std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
+std::deque<simt_stack::fragment_entry> simt_stack::get_fragments(std::map<unsigned, bool> & heights_in_ibuffer, int multi_exec_enabled)
 {
 	//printf("start of get fragments\n");
     std::deque<simt_mask_t> fragment_mask;
@@ -714,12 +714,33 @@ std::deque<simt_stack::fragment_entry> simt_stack::get_fragments()
 	//to get around weird control paths, give priority to higher
 	//fragments when masks collide and prevent lower ones from executing
 	simt_mask_t running_composite_mask = 0;
+	
+	//if multi_exec is disabled
+	if (!multi_exec_enabled){
+		//if we already have an entry in m_fragment_entries or ibuffer, skip
+		if (heights_in_ibuffer.find(m_stack.size()-1) != heights_in_ibuffer.end()){
+			return m_fragment_entries;
+		}
+		//otherwise only return the top entry
+		else{
+			int i = m_stack.size()-1;
+			new_fragment_entry.pc = m_stack.at(i).m_pc;
+			new_fragment_entry.height = i;
+			m_fragment_entries.push_back(new_fragment_entry);
+			return m_fragment_entries;
+		}
+	}
 
     //if there is only 1 entry, it automatically is a fragment
 	
     //iterate from top of the stack to bottom
     for (int i = m_stack.size()-1; i >= 0; i--)
-    {	  
+    {
+		//if we already have an entry in m_fragment_entries or ibuffer, skip
+	  if (heights_in_ibuffer.find(i) != heights_in_ibuffer.end()){
+		continue;
+	  }
+
       //Top of stack is always executable, as that was the previous paradigm  
 	  if (i == (m_stack.size()-1)){
 		//check for mask collisions with higher fragments
@@ -1129,6 +1150,17 @@ void core_t::execute_warp_inst_t(warp_inst_t &inst, unsigned warpId)
             checkExecutionStatusAndUpdate(inst,t,tid);
         }
     } 
+}
+
+unsigned core_t::get_branch_pc(warp_inst_t &inst, unsigned warpId){
+	/*unsigned tid=m_warp_size*inst->;
+    
+	const ptx_instruction * pI = m_thread[tid]->get_inst(inst->pc);
+	
+	const operand_info &target  = pI->dst();
+	ptx_reg_t target_pc = m_thread[tid]->get_operand_value(target, target, U32_TYPE, NULL, 0);
+
+   return target_pc;*/
 }
   
 bool  core_t::ptx_thread_done( unsigned hw_thread_id ) const  

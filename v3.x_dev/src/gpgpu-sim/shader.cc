@@ -514,6 +514,10 @@ void shader_core_stats::print( FILE* fout ) const
    for (unsigned i = 3; i < m_config->warp_size + 3; i++) 
       fprintf(fout, "\tW%d:%d", i-2, shader_cycle_distro[i]);
    fprintf(fout, "\n");
+   fprintf(fout, "Fragment Distribution:");
+   for (unsigned i = 0; i < MAX_WARP_FRAGMENTS; i++) 
+	  fprintf(fout, "\t%u", num_fragment_issued[i]);
+   fprintf(fout, "\n");
 
    m_outgoing_traffic_stats->print(fout); 
    m_incoming_traffic_stats->print(fout); 
@@ -726,10 +730,67 @@ void shader_core_ctx::fetch()
 			}
 		}
 		
-		//if there are already instructions in the ibuffer, never fetch
-		if (!m_warp[warp_id].ibuffer_frag_empty()){
-			continue;
+		//list of fetched heights
+		std::map<unsigned, bool> heights_in_ibuffer;
+		heights_in_ibuffer.clear();	
+		
+		//go through the ibuffer
+		for (int j = 0; j < MAX_WARP_FRAGMENTS; j++){
+			
+			if (j == 0){
+				//initially reset
+				m_warp[warp_id].ibuffer_reset_frag();
+			}
+			else{
+				//otherwise step
+				m_warp[warp_id].ibuffer_next_frag();
+			}
+			
+			//an entry exists
+			if (!m_warp[warp_id].ibuffer_empty()){
+				
+				//entry should match with height in simt_stack
+				//otherwise its due to recovergence shifting stack around, and should
+				//be ignored
+				unsigned height = m_warp[warp_id].ibuffer_get_height();
+				const warp_inst_t *pI = m_warp[warp_id].ibuffer_next_inst();
+				
+				unsigned pc,rpc;
+				unsigned valid_stack_entry = m_simt_stack[warp_id]->iter_get_pdom_stack(height,&pc,&rpc);
+				
+				if (pc == pI->pc){
+					//add to buffer
+					heights_in_ibuffer[height] = true;
+				}
+			}	
 		}
+		
+		//go through fragment entries
+		for (int i = 0; i < m_fragment_entries[warp_id].size(); i++){
+			
+			unsigned height = m_fragment_entries[warp_id][i].height;
+			
+			//should never have a copy in fragment entries and in ibuffer
+			if (heights_in_ibuffer.find(height) != heights_in_ibuffer.end()){
+				printf("warp_id %d has conflict at height %u\n", warp_id, height);
+				abort();
+			}
+			
+			//add to heights
+			heights_in_ibuffer[height] = true;
+		}
+		
+		//if we don't want to fetch beyond, must wait for ibuffer to clear
+		if (!m_config->gpgpu_fetch_beyond){
+			if (!m_warp[warp_id].ibuffer_frag_empty() || m_warp[warp_id].imiss_pending())
+				continue;
+		}
+		
+		//if there are already instructions in the ibuffer, never fetch
+		//using newer fetch scheme
+		/*if (!m_warp[warp_id].ibuffer_frag_empty()){
+			continue;
+		}*/
 		
 		/*if((gpu_tot_sim_cycle+gpu_sim_cycle == 12727)){
 			printf("%Lu shader %u checking warp: %d i = %u max = \n", gpu_tot_sim_cycle+gpu_sim_cycle, m_sid ,warp_id, i, m_config->max_warps_per_shader);
@@ -737,16 +798,24 @@ void shader_core_ctx::fetch()
 		
 		
 		// this code fetches instructions from the i-cache or generates memory requests
-		// if the warp isn't done and we we don't have outstanding misses (BLOCKING)
-		// and there's no entries in the entirety of the icache
-		if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending())
+		// if the warp isn't done
+		// non-blocking, but do stop if the ibuffer is full
+		if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].ibuffer_frag_full() ) //&& !m_warp[warp_id].imiss_pending())
 		{
 		
 			//fragment entries are only loaded in/updated during fetch
 			//this means that for a warp to get more instructions, it MUST execute
 			//every instruction from the previous fetch
-			if (m_fragment_entries[warp_id].size() == 0){
+			/*if (m_fragment_entries[warp_id].size() == 0){
 				m_fragment_entries[warp_id] = m_simt_stack[warp_id]->get_fragments();
+			}*/
+			
+			//always call fetch, but give it a list of heights that we don't want fetched, and append to m_fragment_entries
+			
+			std::deque<simt_stack::fragment_entry> temp_queue = m_simt_stack[warp_id]->get_fragments(heights_in_ibuffer, m_config->gpgpu_enable_multi_exec);
+			
+			for (int i = 0; i < temp_queue.size(); i++){	
+				m_fragment_entries[warp_id].push_back(temp_queue[i]);
 			}
 
 			if (DEBUG_PRINT){
@@ -816,9 +885,6 @@ void shader_core_ctx::fetch()
 				//execute fragments from top of the stack (back of m_fragment_entries queue) first
 				address_type pc = highest_fragment->pc;
 				
-				//update ibuffer with height information
-				m_warp[warp_id].ibuffer_store_height(highest_fragment->height);
-				
 				//printing
 				/*if((gpu_tot_sim_cycle+gpu_sim_cycle >= 12400) && (warp_id == 19) && (m_sid == 11)){
 				printf( "Cycle %Lu: Fetching Warp (warp_id %u) instruction (%s) at stack height %u for ibuffer %d\n",
@@ -832,6 +898,14 @@ void shader_core_ctx::fetch()
 				unsigned offset_in_block = pc & (m_config->m_L1I_config.get_line_sz()-1);
 				if( (offset_in_block+nbytes) > m_config->m_L1I_config.get_line_sz() )
 					nbytes = (m_config->m_L1I_config.get_line_sz()-offset_in_block);
+				
+				//if it's already missing, don't go through again
+				if (m_warp[warp_id].imiss_already_sent(ppc)){
+					continue;
+				}
+				
+				//update ibuffer with height information
+				m_warp[warp_id].ibuffer_store_height(highest_fragment->height);
 
 				// TODO: replace with use of allocator
 				// mem_fetch *mf = m_mem_fetch_allocator->alloc()
@@ -1118,7 +1192,7 @@ int scheduler_unit::check_issue(register_set* pipeline, int max, unsigned warp_i
 	return already_issued;
 }
 
-unsigned scheduler_unit::warp_frag_scoreboard_conflict(unsigned warp_id){
+unsigned scheduler_unit::warp_frag_scoreboard_conflict(unsigned warp_id, bool & valid_inst){
 	
 	//reset internal fragment for every warp
 	warp(warp_id).ibuffer_reset_frag();
@@ -1156,6 +1230,9 @@ unsigned scheduler_unit::warp_frag_scoreboard_conflict(unsigned warp_id){
 				//branch divergence, still counts as active
 
 			} else {
+				
+				//valid instruction
+				valid_inst = true;
 				
 				const active_mask_t &active_mask = m_simt_stack[warp_id]->iter_get_active_mask(height);
 				
@@ -1260,7 +1337,7 @@ void scheduler_unit::cycle()
 		
 		//if a warp has outstanding scoreboard misses, we should also skip
 		if (m_shader->m_config->gpgpu_frag_scoreboard_check){
-			if (warp_frag_scoreboard_conflict(warp_id)){
+			if (warp_frag_scoreboard_conflict(warp_id, valid_inst)){
 				//has conflict, move forward
 				continue;
 			}	
@@ -1419,11 +1496,15 @@ void scheduler_unit::cycle()
 			warp(warp_id).ibuffer_next_frag();	
 		}
 		
-		if (issued > 1){
+		/*if (issued > 1){
 			printf("Shader %d Cycle %Lu:: Warp %u Issued %d fragments\n", m_shader->m_sid,  gpu_tot_sim_cycle+gpu_sim_cycle, warp_id, issued);
-		}
+		}*/
+		
+		//record fragment issuing
 		
 		if (issued){
+			m_stats->num_fragment_issued[issued-1]++;
+			
 			issued_warps++;
 			//book-keeping
 			m_stats->shader_cycle_distro[2+lanes_active]++;
@@ -3391,6 +3472,67 @@ void shader_core_ctx::accept_fetch_response( mem_fetch *mf )
 {
     mf->set_status(IN_SHADER_FETCHED,gpu_sim_cycle+gpu_tot_sim_cycle);
     m_L1I->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
+	
+	//prefetching if enabled
+	if (m_config->gpgpu_icache_prefetch){
+		printf("hello\n");
+		//subtract from PROGRAM_MEM_START to get back usable address
+		address_type pc = mf->get_addr() - PROGRAM_MEM_START;
+		
+		//each instruction is 8 bytes
+		unsigned nbytes=8; 
+		unsigned offset_in_block = pc & (m_config->m_L1I_config.get_line_sz()-1);
+		unsigned block_num = pc / m_config->m_L1I_config.get_line_sz();
+		
+		printf("Fetched block contains:\n");
+		
+		//go through all instructions in the block
+		for (int i = pc; i < (block_num+1)*m_config->m_L1I_config.get_line_sz(); i+=nbytes){
+			printf("%s\n", ptx_get_insn_str(i).c_str());
+			
+			//verifies whether all instructions are in cache
+			address_type ppc = i + PROGRAM_MEM_START;
+			
+			//make sure all of these are in cache
+			mem_access_t acc(INST_ACC_R,ppc,nbytes,false);
+			mem_fetch *mf_temp = new mem_fetch(acc,
+										  NULL/*we don't have an instruction yet*/,
+										  READ_PACKET_SIZE,
+										  -1,
+										  m_sid,
+										  m_tpc,
+										  m_memory_config );
+			std::list<cache_event> events;
+			enum cache_request_status status = m_L1I->access( (new_addr_type)ppc, mf_temp, gpu_sim_cycle+gpu_tot_sim_cycle,events);
+			
+			printf("PC 0x%08llx: Hit = %d\n", ppc, status == HIT);
+			
+			assert(status == HIT);
+			/*
+			//this retrieves a warp_inst_t object from this PC, same as is done in 
+			//decode
+			const warp_inst_t* pI = ptx_fetch_inst(i);
+			warp_inst_t* pI_temp = warp_inst_t();
+			pI_temp = pI;
+
+			if (pI){
+			
+				assert(pI->valid());
+				//check to see if it's a branch
+				if (pI->op == BRANCH_OP){
+					//get_branch_pc(pI_temp, mf->)
+}
+
+
+					printf("Branch PC = 0x%08llx %s\n", pI->reconvergence_pc, ptx_get_insn_str(pI->reconvergence_pc).c_str());
+				}
+			}
+			*/
+		
+		}
+		
+		printf("Fetch block done\n");
+	}
 }
 
 bool shader_core_ctx::ldst_unit_response_buffer_full() const

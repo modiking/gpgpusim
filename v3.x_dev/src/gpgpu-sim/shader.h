@@ -221,6 +221,17 @@ public:
         return count;
 	}
 	
+	bool ibuffer_frag_full() const
+    {
+        for( unsigned j=0; j < MAX_WARP_FRAGMENTS; j++) 
+        {
+			if(!m_ibuffer[j][m_next[j]].m_valid) 
+				return false;
+        }
+
+        return true;
+    }
+	
 
     //NEW, ibuffer_frag_empty
     //checks through the entire ibuffer to see if it is empty
@@ -299,6 +310,19 @@ public:
 		//otherwise there are no pending requests
 		return false;
 	
+	}
+	
+	//NEW, used to check if there's already an imiss entry allocated for an address
+	bool imiss_already_sent(address_type addr) {
+		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
+			if (m_imiss_valid[i] == true){
+				if (m_imiss_adresses[i] == addr){
+					return true;
+				}
+			}
+		}
+		
+		return false;
 	}
 	
 	//NEW, we find an empty spot in the array and store the PC we need
@@ -474,7 +498,7 @@ public:
 	static int check_issue(register_set* pipeline, int max, unsigned warp_id, unsigned long long issue_time);
 	
 	//used to check if any of the fragments of a warp have scoreboard conflicts
-	unsigned warp_frag_scoreboard_conflict(unsigned warp_id);
+	unsigned warp_frag_scoreboard_conflict(unsigned warp_id, bool & valid_inst);
 
     // These are some common ordering fucntions that the
     // higher order schedulers can take advantage of
@@ -1604,6 +1628,9 @@ struct shader_core_config : public core_config
 	int gpgpu_oc_broadcast;
 	int gpgpu_oc_wait_all;
 	int gpgpu_frag_scoreboard_check;
+	int gpgpu_icache_prefetch;
+	int gpgpu_fetch_beyond;
+	int gpgpu_enable_multi_exec;
 };
 
 struct shader_core_stats_pod {
@@ -1662,6 +1689,9 @@ struct shader_core_stats_pod {
     unsigned *last_shader_cycle_distro;
     unsigned *num_warps_issuable;
     unsigned gpgpu_n_stall_shd_mem;
+	
+	//fragment utilization
+	unsigned *num_fragment_issued;
 
     //memory access classification
     int gpgpu_n_mem_read_local;
@@ -1729,6 +1759,9 @@ public:
         m_non_rf_operands=(unsigned*) calloc(config->num_shader(),sizeof(unsigned));
         m_n_diverge = (unsigned*) calloc(config->num_shader(),sizeof(unsigned));
         shader_cycle_distro = (unsigned*) calloc(config->warp_size+3, sizeof(unsigned));
+		
+		num_fragment_issued = (unsigned *) calloc(MAX_WARP_FRAGMENTS, sizeof(unsigned));
+		
         last_shader_cycle_distro = (unsigned*) calloc(m_config->warp_size+3, sizeof(unsigned));
 
         n_simt_to_mem = (long *)calloc(config->num_shader(), sizeof(long));
@@ -1752,6 +1785,7 @@ public:
         free(m_n_diverge); 
         free(shader_cycle_distro);
         free(last_shader_cycle_distro);
+		free(num_fragment_issued);
     }
 
     void new_grid()

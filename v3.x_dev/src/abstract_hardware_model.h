@@ -304,7 +304,7 @@ public:
         address_type pc;
         unsigned height; //distance from the BOTTOM of the stack to the entry, 0-indexed
     };
-    std::deque<fragment_entry> get_fragments();
+    std::deque<fragment_entry> get_fragments(std::map<unsigned, bool> & heights_in_ibuffer, int multi_exec_enabled);
 	
 	//NEW functions: store top of stack temporarily to allow height manipulations in update
 	void remove_to_height(unsigned height);
@@ -1027,6 +1027,9 @@ class core_t {
         virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid)=0;
         class gpgpu_sim * get_gpu() {return m_gpu;}
         void execute_warp_inst_t(warp_inst_t &inst, unsigned warpId =(unsigned)-1);
+		
+		unsigned get_branch_pc(warp_inst_t &inst, unsigned warpId);
+		
         bool  ptx_thread_done( unsigned hw_thread_id ) const ;
 		//NEW: modified to update at a specific height
         void updateSIMTStack_height(unsigned height, unsigned warpId, warp_inst_t * inst, signed * height_removed);

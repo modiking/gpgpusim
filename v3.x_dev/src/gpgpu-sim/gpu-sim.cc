@@ -379,8 +379,21 @@ void shader_core_config::reg_options(class OptionParser * opp)
 	option_parser_register(opp, "-gpgpu_frag_scoreboard_check", OPT_INT32, 
 							&gpgpu_frag_scoreboard_check,
                             "Prevent a warp from issuing if there's a single scoreboard conflict within any of its fragments",
-                             "0");							 
+                             "0");	
+	option_parser_register(opp, "-gpgpu_icache_prefetch", OPT_INT32, 
+							&gpgpu_icache_prefetch,
+                            "Enable icache prefetching or not",
+                             "0");	
 							 
+	option_parser_register(opp, "-gpgpu_fetch_beyond", OPT_INT32, 
+							&gpgpu_fetch_beyond,
+                            "Whether to fetch fragments beyond a single frame (if there's room in ibuffer, fetch executable warp)",
+                             "0");	
+							 
+	option_parser_register(opp, "-gpgpu_enable_multi_exec", OPT_INT32, 
+							&gpgpu_enable_multi_exec,
+                            "Enables Multi-execution or not",
+                             "0");						 
 							 
 }
 
