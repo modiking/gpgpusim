@@ -701,7 +701,7 @@ bool simt_stack::iter_get_pdom_stack(unsigned height, unsigned *pc, unsigned *rp
 }
 
 //NEW function, iterate through stack and find fragments
-std::deque<simt_stack::fragment_entry> simt_stack::get_fragments(std::map<unsigned, bool> & heights_in_ibuffer, int multi_exec_enabled)
+std::deque<simt_stack::fragment_entry> simt_stack::get_fragments(std::map<unsigned, unsigned> & heights_in_ibuffer, int multi_exec_enabled)
 {
 	//printf("start of get fragments\n");
     std::deque<simt_mask_t> fragment_mask;

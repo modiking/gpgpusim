@@ -304,7 +304,7 @@ public:
         address_type pc;
         unsigned height; //distance from the BOTTOM of the stack to the entry, 0-indexed
     };
-    std::deque<fragment_entry> get_fragments(std::map<unsigned, bool> & heights_in_ibuffer, int multi_exec_enabled);
+    std::deque<fragment_entry> get_fragments(std::map<unsigned, unsigned> & heights_in_ibuffer, int multi_exec_enabled);
 	
 	//NEW functions: store top of stack temporarily to allow height manipulations in update
 	void remove_to_height(unsigned height);

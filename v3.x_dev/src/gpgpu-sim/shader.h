@@ -127,6 +127,7 @@ public:
 		
 		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
 			m_next[i]=0;
+			m_flush_status[i] = 0;
 		}
         
     }
@@ -150,6 +151,7 @@ public:
 		
 		for (int i = 0; i < MAX_WARP_FRAGMENTS; i++){
 			m_next[i]=0;
+			m_flush_status[i] = 0;
 		}
     }
 
@@ -325,6 +327,12 @@ public:
 		return false;
 	}
 	
+	//keeps track of whether an entry is going to be flushed
+	//necessary to keep track of what to fetch
+	unsigned get_flush_status(){ return m_flush_status[m_frag_num];}
+	void set_flush_status(){ m_flush_status[m_frag_num] = 1;}
+	void clear_flush_status(){ m_flush_status[m_frag_num] = 0;}
+	
 	//NEW, we find an empty spot in the array and store the PC we need
 	//this will send duplicate requests to the cache, which SHOULD respond back with duplicate requests back
     void set_imiss_pending(address_type addr) 
@@ -418,6 +426,7 @@ private:
     //NEW, 2D array to store fragment information
     ibuffer_entry m_ibuffer[MAX_WARP_FRAGMENTS][IBUFFER_SIZE]; 
     unsigned m_next[MAX_WARP_FRAGMENTS];
+	unsigned m_flush_status[MAX_WARP_FRAGMENTS];
                                    
     unsigned m_n_atomic;           // number of outstanding atomic operations 
     bool     m_membar;             // if true, warp is waiting at memory barrier
@@ -1461,7 +1470,7 @@ protected:
    tex_cache *m_L1T; // texture cache
    read_only_cache *m_L1C; // constant cache
    l1_cache *m_L1D; // data cache
-   std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> > m_pending_writes;
+   std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,std::map<unsigned long/*active mask*/,unsigned/*count*/> > > m_pending_writes;
    std::list<mem_fetch*> m_response_fifo;
    opndcoll_rfu_t *m_operand_collector;
    Scoreboard *m_scoreboard;

@@ -731,7 +731,7 @@ void shader_core_ctx::fetch()
 		}
 		
 		//list of fetched heights
-		std::map<unsigned, bool> heights_in_ibuffer;
+		std::map<unsigned, unsigned> heights_in_ibuffer;
 		heights_in_ibuffer.clear();	
 		
 		//go through the ibuffer
@@ -760,7 +760,7 @@ void shader_core_ctx::fetch()
 				
 				if (pc == pI->pc){
 					//add to buffer
-					heights_in_ibuffer[height] = true;
+					heights_in_ibuffer[height] = pI->pc;
 				}
 			}	
 		}
@@ -769,11 +769,24 @@ void shader_core_ctx::fetch()
 		for (int i = 0; i < m_fragment_entries[warp_id].size(); i++){
 			
 			unsigned height = m_fragment_entries[warp_id][i].height;
+			unsigned pc = m_fragment_entries[warp_id][i].pc;
 			
-			//should never have a copy in fragment entries and in ibuffer
-			if (heights_in_ibuffer.find(height) != heights_in_ibuffer.end()){
-				printf("warp_id %d has conflict at height %u\n", warp_id, height);
-				abort();
+			std::map<unsigned, unsigned>::iterator iter = heights_in_ibuffer.find(height);
+
+			//if there's a valid entry in the ibuffer with the same height
+			//as an entry in the m_fragment_entries
+			if (iter != heights_in_ibuffer.end()){
+				
+				//its possible for a pre-existing entry to hold a request for an entry
+				//already in the ibuffer, in which case remove it from fragment entries
+				if (pc == iter->second){
+					m_fragment_entries[warp_id].erase(m_fragment_entries[warp_id].begin() + i);	
+				}
+				else{
+					//otherwise, there's an error
+					printf("shader %d warp_id %d has conflict at height %u\n", m_sid,warp_id, height);
+					assert(0);
+				}
 			}
 			
 			//add to heights
@@ -2066,7 +2079,7 @@ ldst_unit::process_cache_access( cache_t* cache,
         if ( inst.is_load() ) {
             for ( unsigned r=0; r < 4; r++)
                 if (inst.out[r] > 0)
-                    m_pending_writes[inst.warp_id()][inst.out[r]]--; 
+                    --m_pending_writes[inst.warp_id()][inst.out[r]][inst.get_active_mask().to_ulong()]; 
         }
         if( !write_sent ) 
             delete mf;
@@ -2168,7 +2181,7 @@ bool ldst_unit::memory_cycle( warp_inst_t &inst, mem_stage_stall_type &stall_rea
            if( inst.is_load() ) { 
               for( unsigned r=0; r < 4; r++) 
                   if(inst.out[r] > 0) 
-                      assert( m_pending_writes[inst.warp_id()][inst.out[r]] > 0 );
+                      assert( m_pending_writes[inst.warp_id()][inst.out[r]][inst.get_active_mask().to_ulong()] > 0 );
            } else if( inst.is_store() ) 
               m_core->inc_store_req( inst.warp_id() );
        }
@@ -2401,10 +2414,11 @@ void ldst_unit:: issue( register_set &reg_set )
    if (inst->is_load() and inst->space.get_type() != shared_space) {
       unsigned warp_id = inst->warp_id();
       unsigned n_accesses = inst->accessq_count();
+	  const active_mask_t mask = inst->get_active_mask();
       for (unsigned r = 0; r < 4; r++) {
          unsigned reg_id = inst->out[r];
          if (reg_id > 0) {
-            m_pending_writes[warp_id][reg_id] += n_accesses;
+            m_pending_writes[warp_id][reg_id][mask.to_ulong()] += n_accesses;
          }
       }
    }
@@ -2426,13 +2440,17 @@ void ldst_unit::writeback()
             for( unsigned r=0; r < 4; r++ ) {
                 if( m_next_wb.out[r] > 0 ) {
                     if( m_next_wb.space.get_type() != shared_space ) {
-                        assert( m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]] > 0 );
-                        unsigned still_pending = --m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]];
+                        assert( m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]][m_next_wb.get_active_mask().to_ulong()] > 0 );
+                        unsigned still_pending = --m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]][m_next_wb.get_active_mask().to_ulong()];
+						
+						//because it is now possible to have multiple load request to
+						//the same register from different load ops. We use masks which
+						//are guaranteed to be disjoin as an additional identifier
                         if( !still_pending ) {
-                            m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[r]);
-                            m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r], m_next_wb.get_active_mask() );
-                            insn_completed = true; 
-                        }
+							m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r], m_next_wb.get_active_mask() );
+							m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]].erase(m_next_wb.get_active_mask().to_ulong());
+							insn_completed = true;
+						}
                     } else { // shared 
                         m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r], m_next_wb.get_active_mask() );
                         insn_completed = true; 
@@ -2627,14 +2645,15 @@ void ldst_unit::cycle()
                bool pending_requests=false;
                for( unsigned r=0; r<4; r++ ) {
                    unsigned reg_id = pipe_reg.out[r];
+				   const active_mask_t mask = pipe_reg.get_active_mask();
                    if( reg_id > 0 ) {
-                       if( m_pending_writes[warp_id].find(reg_id) != m_pending_writes[warp_id].end() ) {
-                           if ( m_pending_writes[warp_id][reg_id] > 0 ) {
+                       if( m_pending_writes[warp_id][reg_id].find(mask.to_ulong()) != m_pending_writes[warp_id][reg_id].end() ) {
+                           if ( m_pending_writes[warp_id][reg_id][mask.to_ulong()] > 0 ) {
                                pending_requests=true;
                                break;
                            } else {
                                // this instruction is done already
-                               m_pending_writes[warp_id].erase(reg_id); 
+                               m_pending_writes[warp_id][reg_id].erase(mask.to_ulong()); 
                            }
                        }
                    }
@@ -3013,18 +3032,19 @@ void ldst_unit::print(FILE *fout) const
     fprintf(fout, "Last LD/ST writeback @ %llu + %llu (gpu_sim_cycle+gpu_tot_sim_cycle)\n",
                   m_last_inst_gpu_sim_cycle, m_last_inst_gpu_tot_sim_cycle );
     fprintf(fout,"Pending register writes:\n");
-    std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> >::const_iterator w;
+    std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,std::map<unsigned long/*active mask*/,unsigned/*count*/> > >::const_iterator w;
+	std::map<unsigned/*regnum*/,std::map<unsigned long/*active mask*/,unsigned/*count*/> >::const_iterator k;
+	std::map<unsigned long/*active mask*/,unsigned/*count*/>::const_iterator j;
     for( w=m_pending_writes.begin(); w!=m_pending_writes.end(); w++ ) {
         unsigned warp_id = w->first;
-        const std::map<unsigned/*regnum*/,unsigned/*count*/> &warp_info = w->second;
-        if( warp_info.empty() ) 
-            continue;
-        fprintf(fout,"  w%2u : ", warp_id );
-        std::map<unsigned/*regnum*/,unsigned/*count*/>::const_iterator r;
-        for( r=warp_info.begin(); r!=warp_info.end(); ++r ) {
-            fprintf(fout,"  %u(%u)", r->first, r->second );
-        }
-        fprintf(fout,"\n");
+		fprintf(fout,"  w%2u : ", warp_id );
+		for (k = w->second.begin(); k != w->second.end(); k++){
+			if( k->second.empty() ) 
+				continue;
+			for (j = k->second.begin(); j != k->second.end(); j++)
+				fprintf(fout,"  %u(%u)", k->first, j->second );	
+		}
+		fprintf(fout,"\n");
     }
     m_L1C->display_state(fout);
     m_L1T->display_state(fout);

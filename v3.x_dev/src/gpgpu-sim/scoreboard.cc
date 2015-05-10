@@ -96,6 +96,9 @@ void Scoreboard::reserveRegister(unsigned wid, unsigned regnum, const active_mas
 // Unmark register as write-pending
 void Scoreboard::releaseRegister(unsigned wid, unsigned regnum, const active_mask_t & active_mask) 
 {
+	//If i'm clearing, i'm clearing something
+	assert(active_mask.any());
+	
 	if (reg_table[wid].size() == 0)
 		return;
 	
@@ -103,14 +106,15 @@ void Scoreboard::releaseRegister(unsigned wid, unsigned regnum, const active_mas
 	{
 		if (it->reg == regnum){
 			
-			//Sanity check
-			for (unsigned i = 0; i < active_mask.size(); i++){
+			//it is possible to reset a lane that never was set
+			//as release is called for every operation
+			/*for (unsigned i = 0; i < active_mask.size(); i++){
 				//if we're resetting a lane that was never set
 				if (active_mask[i] && !it->active_mask[i]){
 					printf("Error: trying to reset lanes that were never reserved (sid=%d, wid=%d, regnum=%d).\n", m_sid, wid, regnum);
 					abort();		
 				}
-			}
+			}*/
 			
 			SHADER_DPRINTF( SCOREBOARD,
                     "Release register - warp:%d, reg: %d\n", wid, regnum );
@@ -127,6 +131,8 @@ void Scoreboard::releaseRegister(unsigned wid, unsigned regnum, const active_mas
 	}
 	
 	//baseline was that if we didn't find it we just returned, so we respect it here as well
+	//this is because release is called for every operation, so I could be resetting
+	//a register that was never set because dependencies did not exist
 
 }
 
