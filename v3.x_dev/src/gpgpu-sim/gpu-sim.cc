@@ -393,8 +393,23 @@ void shader_core_config::reg_options(class OptionParser * opp)
 	option_parser_register(opp, "-gpgpu_enable_multi_exec", OPT_INT32, 
 							&gpgpu_enable_multi_exec,
                             "Enables Multi-execution or not",
-                             "0");						 
-							 
+                             "0");			
+	option_parser_register(opp, "-gpgpu_util_scheduler", OPT_INT32, 
+							&gpgpu_util_scheduler,
+                            "Enables secondary scheduling functionality to be paired with",
+                             "0");			
+	option_parser_register(opp, "-gpgpu_2ndsched_issue_smallest", OPT_INT32, 
+							&gpgpu_2ndsched_issue_smallest,
+                            "Issues smallest utilization first when gpgpu_util_scheduler is enabled",
+                             "0");		
+	option_parser_register(opp, "-gpgpu_2ndsched_imiss_check", OPT_INT32, 
+							&gpgpu_2ndsched_imiss_check,
+                            "Checks for warps with IMISS but no SCOREBOARD when gpgpu_util_scheduler is enabled",
+                             "0");							 
+		option_parser_register(opp, "-gpgpu_2ndsched_subset", OPT_INT32, 
+							&gpgpu_2ndsched_subset,
+                            "Designates that a subset of warps should suffer, the parameter indicates what ratio to use (4 = 1/4 suffer) when gpgpu_util_scheduler is enabled",
+                             "0");								 
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)

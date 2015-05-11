@@ -1325,6 +1325,109 @@ void scheduler_unit::cycle()
 	unsigned max_sfu = m_shader->m_config->gpgpu_operand_collector_num_in_ports_sfu / MAX_WARP_FRAGMENTS;
 	unsigned max_mem = m_shader->m_config->gpgpu_operand_collector_num_in_ports_mem / MAX_WARP_FRAGMENTS;
 	
+	//ordering warps
+	if (m_shader->m_config->gpgpu_util_scheduler){
+		
+		unsigned issuable;
+		unsigned total;
+		bool found_one = false;
+		
+		//first look for warps that 1. are not suffering imiss 2. can issue all fragments
+		for ( std::vector< shd_warp_t* >::iterator iter = m_next_cycle_prioritized_warps.begin();
+          iter != m_next_cycle_prioritized_warps.end();
+          iter++ ) {
+			
+			//check no imiss
+			if ((*iter)->imiss_pending()){
+				continue;
+			}
+			
+			//check no scoreboard
+			if (issuable_fragments((*iter)->get_warp_id(), issuable, total)){
+				//swap
+				shd_warp_t* temp = m_next_cycle_prioritized_warps.front();
+				m_next_cycle_prioritized_warps.front() = *iter;
+				*iter = temp;
+				found_one = true;
+				break;
+			}	  
+		}
+		
+		if (m_shader->m_config->gpgpu_2ndsched_imiss_check){
+			if (!found_one){
+				//second look for warp that is 1. suffering imiss 2. can issue all fragments
+				for ( std::vector< shd_warp_t* >::iterator iter = m_next_cycle_prioritized_warps.begin();
+				  iter != m_next_cycle_prioritized_warps.end();
+				  iter++ ) {
+					
+					//check no scoreboard
+					if (issuable_fragments((*iter)->get_warp_id(), issuable, total)){
+						//swap
+						shd_warp_t* temp = m_next_cycle_prioritized_warps.front();
+						m_next_cycle_prioritized_warps.front() = *iter;
+						*iter = temp;
+						found_one = true;
+						break;
+					}	  
+				}
+			}
+		}
+		
+		if (m_shader->m_config->gpgpu_2ndsched_issue_smallest){
+			//try smallest?
+			if (!found_one){
+				unsigned smallest_issuable = -1;
+				unsigned largest_total = 0;
+				
+				std::vector< shd_warp_t* >::iterator iter_smallest = m_next_cycle_prioritized_warps.end();
+				
+				//second look for warp that is 1. suffering imiss 2. can issue all fragments
+				for ( std::vector< shd_warp_t* >::iterator iter = m_next_cycle_prioritized_warps.begin();
+				  iter != m_next_cycle_prioritized_warps.end();
+				  iter++ ) {
+					
+					//get issue information
+					issuable_fragments((*iter)->get_warp_id(), issuable, total);
+					
+					if (issuable > 0){
+						//smaller issuable, large total
+						if (((issuable <= smallest_issuable) && (total > largest_total))
+							|| ((issuable < smallest_issuable) && (total >= largest_total))){
+							smallest_issuable = issuable;
+							largest_total = total;
+							iter_smallest = iter;
+						}
+					}	  
+				}
+				
+				//swap if it exists, otherwise gto takes care of everything
+				if (iter_smallest != m_next_cycle_prioritized_warps.end()){
+					//swap
+					shd_warp_t* temp = m_next_cycle_prioritized_warps.front();
+					m_next_cycle_prioritized_warps.front() = *iter_smallest;
+					*iter_smallest = temp;
+					found_one = true;
+				}
+			}
+		}
+		
+		if (m_shader->m_config->gpgpu_2ndsched_subset){
+			//designate a subset of warps to suffer
+			unsigned suffer_count = m_next_cycle_prioritized_warps.size()/m_shader->m_config->gpgpu_2ndsched_subset;
+			
+			//subset consists of suffer_count # of warps starting from lowest ID
+			std::sort(m_next_cycle_prioritized_warps.begin(), m_next_cycle_prioritized_warps.end(), sort_warps_by_warp_id);
+			
+			m_next_cycle_prioritized_warps.resize(suffer_count);
+			
+			//order by oldest for arbitration
+			std::sort(m_next_cycle_prioritized_warps.begin(), m_next_cycle_prioritized_warps.end(), sort_warps_by_oldest_dynamic_id);
+		}
+		
+		//otherwise, just let original scheduler dictate order
+		
+	}
+	
     for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
           iter != m_next_cycle_prioritized_warps.end();
           iter++ ) {
@@ -1578,6 +1681,80 @@ bool scheduler_unit::sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t
     } else {
         return lhs < rhs;
     }
+}
+
+bool scheduler_unit::sort_warps_by_warp_id(shd_warp_t* lhs, shd_warp_t* rhs)
+{
+    if (rhs && lhs) {
+        if ( lhs->done_exit() || lhs->waiting() ) {
+            return false;
+        } else if ( rhs->done_exit() || rhs->waiting() ) {
+            return true;
+        } else {
+            return lhs->get_warp_id() < rhs->get_warp_id();
+        }
+    } else {
+        return lhs < rhs;
+    }
+}
+
+bool scheduler_unit::issuable_fragments(unsigned warp_id, unsigned & issuable, unsigned & total){
+	
+	issuable = 0;
+	total = 0;
+	
+	warp(warp_id).ibuffer_reset_frag();
+	
+	unsigned checked = 0;
+	
+	while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_frag_empty() && (checked < MAX_WARP_FRAGMENTS)) {	
+		checked++;
+	
+		bool valid = warp(warp_id).ibuffer_next_valid();
+		//skip over invalid buffers
+		if (!valid){
+			//move on to next ibuffer entry
+			warp(warp_id).ibuffer_next_frag();
+			continue;
+		}
+		
+		//increase total count
+		total++;
+		
+		const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
+		unsigned height = warp(warp_id).ibuffer_get_height();
+		//NEW, variable to track if we exceeded the stack
+		bool valid_stack_entry = true;
+
+		unsigned pc,rpc;
+		valid_stack_entry = m_simt_stack[warp_id]->iter_get_pdom_stack(height,&pc,&rpc);
+	  
+		//should still check if there's at least 1 instruction
+		if( pI ) {
+			//sanity check that the instruction is valid
+			assert(valid_stack_entry && valid);
+			//HAVE AN INSTRUCTION THAT CAN BE ISSUED
+			const active_mask_t &active_mask = m_simt_stack[warp_id]->iter_get_active_mask(height);
+			
+			if ( !m_scoreboard->checkCollision(warp_id, pI, active_mask) ){
+				//no collision, issuable
+				issuable++;
+			}
+		}
+		else if( valid ){
+			//its at least flushable, so it counts
+			issuable++;
+			
+		}
+	}
+	
+	//everything is issuable
+	if (issuable == total){
+		return true;
+	}
+	
+	return false;	
+	
 }
 
 unsigned scheduler_unit::get_exec_lanes(shd_warp_t* lhs){

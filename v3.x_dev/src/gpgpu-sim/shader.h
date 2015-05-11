@@ -506,6 +506,10 @@ public:
 	// warp on the same cycle through
 	static int check_issue(register_set* pipeline, int max, unsigned warp_id, unsigned long long issue_time);
 	
+	//grabs a count of issuable fragments, also sends back true if all are issuable
+	//and false if not
+	bool issuable_fragments(unsigned warp_id, unsigned & issuable, unsigned & total);
+	
 	//used to check if any of the fragments of a warp have scoreboard conflicts
 	unsigned warp_frag_scoreboard_conflict(unsigned warp_id, bool & valid_inst);
 
@@ -535,6 +539,8 @@ public:
                             OrderingType age_ordering,
                             bool (*priority_func)(U lhs, U rhs) );
     static bool sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t* rhs);
+	
+	static bool sort_warps_by_warp_id(shd_warp_t* lhs, shd_warp_t* rhs);
 	
 	//New sorting priority function, sorts based off of # of lanes 
 	static bool sort_warps_by_utilization(shd_warp_t* lhs, shd_warp_t* rhs);
@@ -1640,6 +1646,10 @@ struct shader_core_config : public core_config
 	int gpgpu_icache_prefetch;
 	int gpgpu_fetch_beyond;
 	int gpgpu_enable_multi_exec;
+	int gpgpu_util_scheduler;
+	int gpgpu_2ndsched_issue_smallest;
+	int gpgpu_2ndsched_imiss_check;
+	int gpgpu_2ndsched_subset;
 };
 
 struct shader_core_stats_pod {
